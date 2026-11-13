@@ -11,7 +11,7 @@ const path = require('node:path');
 const { addLocation, tx } = require('./db');
 const { walkMedia, hashFile, quickHash, throttle } = require('./util');
 const { pin, currentPath, online } = require('./volumes');
-const { walkCamera, learnPrefixes } = require('./discover');
+const { walkCamera, learnPrefixes, prefixOf } = require('./discover');
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS lib_files (
@@ -128,6 +128,31 @@ async function discover(db, roots, opts, job, emit) {
   }
   progress.flush();
   return res;
+}
+
+/**
+ * What the found files are called: the letters before the first number in each name,
+ * with how many files share them. Shows which naming patterns the scan actually matched.
+ */
+function foundPrefixes(db) {
+  ensure(db);
+  const groups = new Map();
+  for (const r of db.prepare("SELECT rel, size, kind FROM lib_files WHERE src = 'scan'").all()) {
+    const name = r.rel.slice(r.rel.lastIndexOf('\\') + 1);
+    const key = prefixOf(name) || (/^\d/.test(name) ? '(starts with a number)' : '(no number in the name)');
+    const g = groups.get(key) || { prefix: key, files: 0, bytes: 0, raw: 0, still: 0, video: 0, example: name };
+    g.files += 1;
+    g.bytes += r.size;
+    if (r.kind) g[r.kind] += 1;
+    groups.set(key, g);
+  }
+  return [...groups.values()].sort((a, b) => b.files - a.files);
+}
+
+/** Remove the everything-in-the-folder entries for a whole drive (they are replaced by a scan). */
+function dropWholeDrive(db, vol) {
+  ensure(db);
+  return Number(db.prepare("DELETE FROM lib_files WHERE vol = ? AND src = 'folder'").run(vol).changes);
 }
 
 /** Remove files the scan found under a folder (used when the user excludes it). */
@@ -442,4 +467,4 @@ async function runFolderScan(db, opts, job, emit) {
   return { scanned: inv.files, ...m, skippedFolders: inv.skippedFolders };
 }
 
-module.exports = { inventory, discover, foundFolders, dropScanned, matchCards, hashPending, indexStatus, runFolderScan };
+module.exports = { inventory, discover, foundFolders, foundPrefixes, dropScanned, dropWholeDrive, matchCards, hashPending, indexStatus, runFolderScan };

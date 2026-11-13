@@ -41,17 +41,25 @@ const JUNK_NAME = /screen ?shot|screen ?record|screencast|screen ?capture|^captu
 const RECORDER_NAME = /^\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}/;
 
 // Names cameras, drones and phones give their files.
-const CAMERA_NAMES = [
-  /^_?DSC[_NF]?\d{4,5}/i, // Nikon, Sony, Fujifilm
-  /^_?[A-Z]{3}_?\d{4,5}\./i, // custom three-letter prefixes set in-camera (e.g. ABC_1234, _ABC1234)
-  /^(IMG|MVI|_MG|CRW|EOS)_\d{4}/i, // Canon, iPhone
-  /^DJI_\d{4}/i, /^DJI_\d{14}_\d{4}/i, // DJI
-  /^(GOPR|GP|GH|GX|GS|G)\d{6,7}/i, // GoPro
-  /^C\d{4}\./i, /^MAH\d{5}/i, // Sony video
-  /^P\d{7}/i, /^(IMGP|PICT|SAM_|SDC|CIMG|KIF_|DSCF|DSCN|R\d{7})\d*/i, // Panasonic and others
-  /^PXL_\d{8}_/i, /^(VID|IMG|PANO|PRO_VID|LRV)_\d{8}_\d{6}/i, /^\d{8}_\d{6}/, // phones, Insta360
-  /^MOV_?\d{4,5}/i, /^(A|B|C)\d{3}_?C\d{3}/i, // cinema cameras
+// Each rule carries a plain description and an example, so the app can show what it looks for.
+const CAMERA_RULES = [
+  { re: /^_?DSC[_NF]?\d{4,5}/i, label: 'Nikon, Sony, Fujifilm', example: 'DSC_0042.JPG, _DSC0042.JPG, DSCF0042.JPG' },
+  { re: /^_?[A-Z]{3}_?\d{4,5}\./i, label: 'Three letters set in the camera, then a number', example: 'ABC_1234.JPG, _ABC1234.JPG' },
+  { re: /^(IMG|MVI|_MG|CRW|EOS)_\d{4}/i, label: 'Canon, iPhone', example: 'IMG_1234.JPG, MVI_1234.MOV' },
+  { re: /^DJI_\d{4}/i, label: 'DJI drones', example: 'DJI_0327.MP4' },
+  { re: /^DJI_\d{14}_\d{4}/i, label: 'DJI drones (dated names)', example: 'DJI_20260506133801_0001.MP4' },
+  { re: /^(GOPR|GP|GH|GX|GS|G)\d{6,7}/i, label: 'GoPro', example: 'GOPR0042.MP4, GX010405.MP4' },
+  { re: /^C\d{4}\./i, label: 'Sony video', example: 'C0001.MP4' },
+  { re: /^MAH\d{5}/i, label: 'Sony video (older)', example: 'MAH00042.MP4' },
+  { re: /^P\d{7}/i, label: 'Panasonic', example: 'P1000042.JPG' },
+  { re: /^(IMGP|PICT|SAM_|SDC|CIMG|KIF_|DSCF|DSCN|R\d{7})\d*/i, label: 'Pentax, Samsung, Casio, Ricoh and others', example: 'IMGP0042.JPG, SAM_0042.JPG' },
+  { re: /^PXL_\d{8}_/i, label: 'Pixel phones', example: 'PXL_20260819_143609.jpg' },
+  { re: /^(VID|IMG|PANO|PRO_VID|LRV)_\d{8}_\d{6}/i, label: 'Android phones, Insta360', example: 'VID_20260819_143609.mp4' },
+  { re: /^\d{8}_\d{6}/, label: 'Phones (date and time as the name)', example: '20260819_143609.jpg' },
+  { re: /^MOV_?\d{4,5}/i, label: 'Camcorders', example: 'MOV_0042.mp4' },
+  { re: /^(A|B|C)\d{3}_?C\d{3}/i, label: 'Cinema cameras', example: 'A001_C003.MOV' },
 ];
+const CAMERA_NAMES = CAMERA_RULES.map((r) => r.re);
 
 // A camera card's own folders: DCIM, and names like 100NIKON or 101MEDIA.
 const CARD_FOLDER = /\\DCIM\\|\\\d{3}[A-Z0-9_]{5}\\/i;
@@ -61,13 +69,35 @@ const CARD_FOLDER = /\\DCIM\\|\\\d{3}[A-Z0-9_]{5}\\/i;
  * cards and in the Lightroom catalog cache (names only). A prefix is the letters before
  * the first digit, and it has to turn up often to count.
  */
-function learnPrefixes(db) {
-  const counts = new Map();
+const LEARN_MIN = 25; // a prefix has to appear on this many files to be learned
+const prefixOf = (name) => {
+  const m = /^([A-Za-z_\-]{2,24})(?=\d)/.exec(name || '');
+  return m ? m[1].toUpperCase() : null;
+};
+const cleanPrefix = (p) => String(p || '').trim().toUpperCase().replace(/[^A-Z0-9_\- ]/g, '').slice(0, 24);
+const readList = (db, key) => {
+  try {
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+    return row && row.value ? JSON.parse(row.value) : [];
+  } catch {
+    return [];
+  }
+};
+
+/**
+ * Every prefix the scan knows about beyond the built-in camera names:
+ *  - learned: seen often on your cards or in the Lightroom catalog cache;
+ *  - added: ones you typed in.
+ * Each has a count of the known files that carry it, an example, and whether it is in use.
+ */
+function prefixList(db) {
+  const seen = new Map(); // prefix -> { count, example }
   const add = (name) => {
-    const m = /^([A-Za-z_\-]{2,24})(?=\d)/.exec(name || '');
-    if (!m) return;
-    const k = m[1].toUpperCase();
-    counts.set(k, (counts.get(k) || 0) + 1);
+    const k = prefixOf(name);
+    if (!k) return;
+    const e = seen.get(k) || { count: 0, example: name };
+    e.count += 1;
+    seen.set(k, e);
   };
   for (const r of db.prepare('SELECT name FROM files').all()) add(r.name);
   try {
@@ -75,7 +105,40 @@ function learnPrefixes(db) {
   } catch {
     /* no Lightroom cache yet */
   }
-  return [...counts].filter(([, n]) => n >= 25).map(([k]) => k);
+  const ignored = new Set(readList(db, 'scanIgnoredPrefixes'));
+  const custom = readList(db, 'scanPrefixes');
+  const out = custom.map((p) => ({ prefix: p, source: 'added', count: (seen.get(p) || {}).count || 0, example: (seen.get(p) || {}).example || '', active: true }));
+  for (const [k, e] of seen) {
+    if (e.count < LEARN_MIN || custom.includes(k)) continue;
+    if (JUNK_NAME.test(k)) continue; // e.g. SCREENSHOT_ or an export prefix: those names are left out anyway
+    out.push({ prefix: k, source: 'learned', count: e.count, example: e.example, active: !ignored.has(k) });
+  }
+  return out.sort((a, b) => b.count - a.count || a.prefix.localeCompare(b.prefix));
+}
+
+/** The prefixes actually used by a scan. */
+function learnPrefixes(db) {
+  return prefixList(db).filter((p) => p.active).map((p) => p.prefix);
+}
+
+/** What the scan looks for and leaves out, in plain words, for display. */
+function describeRules() {
+  return {
+    raw: [...RAW].sort(),
+    still: [...STILL].sort(),
+    video: [...VIDEO].sort(),
+    minStill: 300 * 1024,
+    minVideo: 2 * 1024 * 1024,
+    learnMin: LEARN_MIN,
+    cameraNames: CAMERA_RULES.map((r) => ({ label: r.label, example: r.example })),
+    junkFolders: ['cache', 'temp', 'tmp', 'thumbnails', 'Premiere auto-save and preview folders', 'media cache', 'Motion Array', 'Envato', 'htdocs', 'wp-content', 'vendor', 'dist', 'icons', 'sprites'],
+    outputFolders: ['stock', 'templates', 'screenshots', 'screen recordings', 'captures', 'exports', 'renders', 'delivery', 'finals', 'edited', 'edits', 'web', 'social', 'proofs', 'build'],
+    // Kept in step with JUNK_NAME and RECORDER_NAME above.
+    junkWords: ['screenshot', 'screen recording', 'screencast', 'capture', 'snip', 'AdobeStock', 'Shutterstock', 'iStock', 'Pexels', 'Pixabay', 'Envato', 'Motion Array',
+      'Unsplash', 'WhatsApp', 'FB_IMG', 'received_', 'signal-', 'telegram', 'thumb', 'icon', 'logo', 'banner', 'export', 'render', 'final', 'edit', 'edited', 'copy',
+      'sneak peek', 'watermark', 'proof', 'a screen recorder\'s date-and-time name (2026-06-10 17-43-53)'],
+    neverWalked: [...SKIP_DIRS].sort(),
+  };
 }
 
 /**
@@ -138,4 +201,4 @@ async function* walkCamera(root, opts, job) {
   }
 }
 
-module.exports = { classify, learnPrefixes, walkCamera, RAW, STILL, VIDEO };
+module.exports = { classify, learnPrefixes, prefixList, prefixOf, cleanPrefix, describeRules, walkCamera, RAW, STILL, VIDEO };

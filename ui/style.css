@@ -197,3 +197,17 @@ progress { width: 220px; height: 8px; accent-color: var(--accent); }
 .checks { display: flex; flex-wrap: wrap; gap: 8px 22px; margin-bottom: 8px; }
 label.check { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
 .row.toolbar.spaced { margin-top: 22px; }
+
+/* What the scan looks for */
+details.rules { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 16px; margin: 4px 0 8px; }
+details.rules summary { cursor: pointer; font-weight: 600; }
+details.rules summary .none { font-weight: 400; font-size: 12px; }
+details.rules h3 { font-size: 13px; font-weight: 600; margin: 18px 0 4px; }
+details.rules .hint { margin: 4px 0 6px; }
+table.compact th, table.compact td { padding: 4px 10px; font-size: 13px; }
+table.compact th { position: static; background: none; }
+tr.dim td { opacity: .55; }
+code.big { font-size: 13px; color: var(--text); }
+.chips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 4px; }
+.chip { padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+.addprefix { margin-top: 8px; max-width: 360px; }

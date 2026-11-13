@@ -10,7 +10,8 @@ const { setVolumes, syncDb, pin, currentPath, online, pathExists } = require('./
 const { scanCard, cardSummary } = require('./core/cards');
 const { runImport } = require('./core/importer');
 const { findOriginalsRoots, runLightroomCheck } = require('./core/lightroom');
-const { runFolderScan, inventory, hashPending, indexStatus, discover, foundFolders, dropScanned } = require('./core/libindex');
+const { runFolderScan, inventory, hashPending, indexStatus, discover, foundFolders, foundPrefixes, dropScanned, dropWholeDrive } = require('./core/libindex');
+const { describeRules, prefixList, cleanPrefix } = require('./core/discover');
 const { overview, listFiles } = require('./core/library');
 
 let win = null;
@@ -44,6 +45,7 @@ async function refreshDrives() {
       setVolumes(volumes);
       const moved = syncDb(db, volumes);
       if (moved) send('volumes', { moved });
+      wholeDrivesToScan();
     }
     const changed = JSON.stringify(cards.map((d) => d.serial)) !== JSON.stringify(drives.map((d) => d.serial));
     drives = cards;
@@ -51,6 +53,31 @@ async function refreshDrives() {
   } catch {
     /* keep the last known list */
   }
+}
+
+/**
+ * A whole drive added as an "extra folder" would index every photo and video on it,
+ * junk included. Treat it as a drive to scan for imported media instead: move it to
+ * the scan list and drop the everything-on-the-drive entries it had put in the index.
+ */
+function wholeDrivesToScan() {
+  const s = getSettings(db);
+  let pins = [];
+  let serials = [];
+  try {
+    pins = JSON.parse(s.libraryFolders || '[]').map((p) => (typeof p === 'string' ? pin(p) : p));
+    serials = JSON.parse(s.indexDrives || '[]');
+  } catch {
+    return;
+  }
+  const isRoot = (p) => p.vol && (p.rel === '\\' || p.rel === '' || p.rel === '/');
+  const roots = pins.filter(isRoot);
+  if (!roots.length) return;
+  for (const r of roots) {
+    if (!serials.includes(r.vol)) serials.push(r.vol);
+    dropWholeDrive(db, r.vol);
+  }
+  setSettings(db, { libraryFolders: JSON.stringify(pins.filter((p) => !isRoot(p))), indexDrives: JSON.stringify(serials) });
 }
 
 // Folder settings are stored pinned to their drive, and read back at its current letter.
@@ -192,6 +219,32 @@ function registerIpc() {
     found: foundFolders(db).slice(0, 80).map((g) => ({ ...g, path: g.path || `${g.rel} (drive not connected)` })),
     excluded: excludedPins().map((p) => currentPath(p)),
   }));
+  // What the scan looks for: built-in rules, your prefixes, and the names it actually found.
+  const listSetting = (key) => {
+    try {
+      return JSON.parse(getSettings(db)[key] || '[]');
+    } catch {
+      return [];
+    }
+  };
+  const rulesOut = () => ({ rules: describeRules(), prefixes: prefixList(db), found: foundPrefixes(db).slice(0, 60) });
+  ipcMain.handle('index:rules', rulesOut);
+  ipcMain.handle('index:addPrefix', (_e, p) => {
+    const k = cleanPrefix(p);
+    if (k.length >= 2) setSettings(db, { scanPrefixes: JSON.stringify([...new Set([...listSetting('scanPrefixes'), k])]) });
+    return rulesOut();
+  });
+  ipcMain.handle('index:removePrefix', (_e, p) => {
+    setSettings(db, { scanPrefixes: JSON.stringify(listSetting('scanPrefixes').filter((x) => x !== p)) });
+    return rulesOut();
+  });
+  // Turn a learned prefix off or back on.
+  ipcMain.handle('index:togglePrefix', (_e, p) => {
+    const cur = listSetting('scanIgnoredPrefixes');
+    setSettings(db, { scanIgnoredPrefixes: JSON.stringify(cur.includes(p) ? cur.filter((x) => x !== p) : [...cur, p]) });
+    return rulesOut();
+  });
+
   ipcMain.handle('index:setDrives', (_e, serials) => setSettings(db, { indexDrives: JSON.stringify([...new Set(serials || [])]) }));
   ipcMain.handle('index:exclude', (_e, folder) => {
     const pins = excludedPins().filter((p) => currentPath(p).toLowerCase() !== String(folder).toLowerCase());

@@ -1,4 +1,4 @@
-// Drive letters move around (a USB hub re-enumerates and J: becomes K:), so a
+// Drive letters move around (a USB hub re-enumerates and E: becomes F:), so a
 // recorded path is tied to the drive itself, by its volume serial number, and the
 // letter is looked up fresh each time.
 //
@@ -7,10 +7,10 @@
 // the stored paths for that drive are rewritten to match.
 const fs = require('node:fs');
 
-let letterBySerial = new Map(); // "1A2B3C4D" -> "J:"
-let serialByLetter = new Map(); // "J:" -> "1A2B3C4D"
+let letterBySerial = new Map(); // "1A2B3C4D" -> "E:"
+let serialByLetter = new Map(); // "E:" -> "1A2B3C4D"
 
-/** list: [{ letter: "J:", serial, label }] for every volume connected right now. */
+/** list: [{ letter: "E:", serial, label }] for every volume connected right now. */
 function setVolumes(list) {
   letterBySerial = new Map();
   serialByLetter = new Map();
@@ -22,7 +22,7 @@ function setVolumes(list) {
   }
 }
 
-/** Split "J:\Photos\a.nef" into the drive it is on and the path within it. */
+/** Split "E:\Photos\a.nef" into the drive it is on and the path within it. */
 function pin(p) {
   const m = /^([A-Za-z]:)([\\/].*)?$/.exec(p || '');
   const vol = m ? serialByLetter.get(m[1].toUpperCase()) || null : null;
@@ -91,7 +91,7 @@ function syncDb(db, list) {
   return moved;
 }
 
-/** Name of a drive for display, e.g. 'drive "Projects" (was J:)'. */
+/** Name of a drive for display, e.g. 'drive "Projects" (was E:)'. */
 function describe(db, vol) {
   if (!vol) return '';
   const v = db.prepare('SELECT label, last_letter FROM volumes WHERE serial = ?').get(vol);

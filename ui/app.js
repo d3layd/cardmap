@@ -184,6 +184,7 @@ function show(view) {
 // Development hook used by the screenshot aid in main.js.
 window.__show = (v) => {
   if (v.startsWith('import:')) { state.drawer = 'import'; return openMounted(v.slice(7)); }
+  if (v === 'rules') { state.rulesOpen = true; return show('index'); }
   if (v.startsWith('local:')) { state.drawer = 'local'; return openMounted(v.slice(6)); }
   if (v.startsWith('lr:')) { state.drawer = 'lightroom'; return openMounted(v.slice(3)); }
   if (v.startsWith('m:')) return openMounted(v.slice(2));
@@ -368,8 +369,8 @@ function localPanel(s) {
       if (!p) return;
       state.libFolders = await api.invoke('library:setFolders', [...(state.libFolders || []).map((x) => x.path), p]);
       draw();
-    } }, 'Add a folder or drive'),
-    h('div', { class: 'hint' }, 'These folders are remembered for next time. A whole drive works too, it just takes longer.'),
+    } }, 'Add a folder'),
+    h('div', { class: 'hint' }, 'These folders are remembered for next time. For a whole drive, tick it under Library index instead, so only imported media is looked at.'),
 
     h('h3', {}, h('span', { class: 'step' }, '3'), 'Search'),
     h('div', { class: 'hint' }, s.mounted ? 'Keep the card in: matching files are read from it to compare.' : 'The card is not connected, so only files CardMap has already read can be matched.'),
@@ -637,7 +638,7 @@ function settingsView() {
 
 // ---------- library index ----------
 async function loadIndex() {
-  state.index = await api.invoke('index:status');
+  [state.index, state.rules] = await Promise.all([api.invoke('index:status'), api.invoke('index:rules')]);
   state.libFolders = state.index.folders.map((f) => ({ path: f.path, exists: f.exists }));
   if (state.view === 'index') renderMain();
 }
@@ -648,6 +649,69 @@ function bgLine(p) {
   const count = p.filesTotal ? ` · file ${(p.filesDone || 0).toLocaleString()} of ${p.filesTotal.toLocaleString()}` : '';
   const size = p.bytesTotal ? ` · ${bytes(p.bytesDone)} of ${bytes(p.bytesTotal)} read this run` : '';
   return `${p.label || 'Working'}${pct}${count}${size}`;
+}
+
+/** "What the scan looks for": the rules, your prefixes, and the names it actually found. */
+function rulesSection(ix) {
+  const r = state.rules;
+  if (!r) return h('div', { class: 'hint' }, 'Loading what the scan looks for');
+  const set = (next) => { state.rules = next; renderMain(); };
+  const kb = (n) => (n >= 1024 * 1024 ? `${n / 1024 / 1024} MB` : `${n / 1024} KB`);
+  const chips = (list) => h('div', { class: 'chips' }, list.map((x) => h('span', { class: 'chip' }, x)));
+  const input = h('input', { type: 'text', placeholder: 'e.g. SMITH_', 'aria-label': 'Prefix to add', maxlength: '24' });
+  const add = async () => { if (input.value.trim().length >= 2) set(await api.invoke('index:addPrefix', input.value)); };
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') add(); });
+  const inUse = r.prefixes.filter((p) => p.active).length;
+
+  return h('details', { class: 'rules', open: state.rulesOpen, ontoggle: (e) => { state.rulesOpen = e.target.open; } },
+    h('summary', {}, 'What the scan looks for',
+      h('span', { class: 'none' }, ` ${inUse} of your own prefixes, ${r.rules.cameraNames.length} built-in camera name patterns, ${r.rules.raw.length + r.rules.still.length + r.rules.video.length} file types`)),
+
+    h('h3', {}, 'Your file name prefixes'),
+    h('p', { class: 'hint' }, `The letters before the first number in a file name. Learned ones appear on at least ${r.rules.learnMin} files on your cards or in your Lightroom library. A JPG or video whose name starts with one of these, followed by a number, is kept.`),
+    r.prefixes.length
+      ? h('table', { class: 'compact' },
+          h('thead', {}, h('tr', {}, h('th', {}, 'Prefix'), h('th', { class: 'num' }, 'Known files'), h('th', {}, 'Example'), h('th', {}, 'From'), h('th', {}, 'Used'), h('th', {}, ''))),
+          h('tbody', {}, r.prefixes.map((p) => h('tr', { class: p.active ? '' : 'dim' },
+            h('td', {}, h('code', { class: 'big' }, p.prefix)),
+            h('td', { class: 'num' }, p.count ? p.count.toLocaleString() : ''),
+            h('td', {}, p.example),
+            h('td', {}, p.source === 'added' ? 'Added by you' : 'Learned'),
+            h('td', {}, p.active ? h('span', { class: 'ok' }, 'Yes') : h('span', { class: 'none' }, 'No')),
+            h('td', {}, p.source === 'added'
+              ? h('button', { class: 'link', 'aria-label': `Remove ${p.prefix}`, disabled: ix.running, onclick: async () => set(await api.invoke('index:removePrefix', p.prefix)) }, 'Remove')
+              : h('button', { class: 'link', 'aria-label': `${p.active ? 'Ignore' : 'Use'} ${p.prefix}`, disabled: ix.running, onclick: async () => set(await api.invoke('index:togglePrefix', p.prefix)) }, p.active ? 'Ignore' : 'Use again'))))))
+      : h('p', { class: 'hint' }, 'None learned yet. Read a card or the Lightroom catalog first, or add one below.'),
+    h('div', { class: 'row tight addprefix' }, input, h('button', { class: 'btn', disabled: ix.running, onclick: add }, 'Add prefix')),
+    h('p', { class: 'hint' }, 'Changes apply the next time you scan.'),
+
+    h('h3', {}, 'Built-in camera, drone and phone names'),
+    h('table', { class: 'compact' },
+      h('thead', {}, h('tr', {}, h('th', {}, 'Made by'), h('th', {}, 'Looks like'))),
+      h('tbody', {}, r.rules.cameraNames.map((c) => h('tr', {}, h('td', {}, c.label), h('td', {}, h('code', { class: 'big' }, c.example)))))),
+
+    h('h3', {}, 'File types'),
+    h('p', { class: 'hint' }, 'Raw files are kept wherever they are, whatever they are called.'), chips(r.rules.raw),
+    h('p', { class: 'hint' }, `Photos need a matching name and must be at least ${kb(r.rules.minStill)}.`), chips(r.rules.still),
+    h('p', { class: 'hint' }, `Videos need a matching name and must be at least ${kb(r.rules.minVideo)}.`), chips(r.rules.video),
+    h('p', { class: 'hint' }, 'Anything inside a camera card folder (DCIM, or a name like 100NIKON) is kept without a name check. Every other type, such as PNG, GIF, PSD and TIF, is left out.'),
+
+    h('h3', {}, 'Left out'),
+    h('p', { class: 'hint' }, 'Photos and videos with any of these words in the file name:'), chips(r.rules.junkWords),
+    h('p', { class: 'hint' }, 'Photos and videos inside a folder with one of these names (raw files there are still kept):'), chips(r.rules.outputFolders),
+    h('p', { class: 'hint' }, 'Everything inside a folder with one of these names:'), chips(r.rules.junkFolders),
+    h('p', { class: 'hint' }, 'Folders that are never opened:'), chips(r.rules.neverWalked),
+
+    r.found.length ? h('h3', {}, 'Names of the files it found') : null,
+    r.found.length ? h('p', { class: 'hint' }, 'The found files grouped by the letters before the first number in their name. This shows which patterns actually matched.') : null,
+    r.found.length
+      ? h('table', { class: 'compact' },
+          h('thead', {}, h('tr', {}, h('th', {}, 'Name starts with'), h('th', { class: 'num' }, 'Files'), h('th', { class: 'num' }, 'Size'),
+            h('th', { class: 'num' }, 'Raw'), h('th', { class: 'num' }, 'Photos'), h('th', { class: 'num' }, 'Videos'), h('th', {}, 'Example'))),
+          h('tbody', {}, r.found.map((g) => h('tr', {},
+            h('td', {}, h('code', { class: 'big' }, g.prefix)), h('td', { class: 'num' }, g.files.toLocaleString()), h('td', { class: 'num' }, bytes(g.bytes)),
+            h('td', { class: 'num' }, g.raw || ''), h('td', { class: 'num' }, g.still || ''), h('td', { class: 'num' }, g.video || ''), h('td', {}, g.example)))))
+      : null);
 }
 
 function indexView() {
@@ -670,7 +734,7 @@ function indexView() {
       !ix.files
         ? h('div', {}, 'Nothing found yet. Tick the drives to look through, then press "Scan for imported media".')
         : h('div', {},
-            h('strong', {}, `${ix.files.toLocaleString()} imported photos and videos found`), ` (${bytes(ix.bytes)}). `,
+            h('strong', {}, `${ix.files.toLocaleString()} photos and videos in the index`), ` (${bytes(ix.bytes)}). `,
             `${ix.hashed.toLocaleString()} indexed so far (${bytes(ix.hashedBytes)}, ${pct}%).`,
             left ? ` ${left.toLocaleString()} still to read.` : ' Everything is indexed.',
             ix.failed ? ` ${ix.failed} could not be read.` : ''),
@@ -698,7 +762,7 @@ function indexView() {
           } }),
           `${d.letter} ${d.label || 'no name'}`)))
       : h('p', { class: 'lede' }, 'No drives found.'),
-    h('div', { class: 'hint' }, 'Kept: raw files anywhere, and JPGs and videos with camera, drone or phone file names or names like the ones in your Lightroom library. Left out: screenshots, screen recordings, PNGs and other graphics, stock, exports and finals, caches, small web images, and program folders.'),
+    rulesSection(ix),
 
     ix.found.length ? h('div', { class: 'row toolbar spaced' }, h('strong', {}, 'Where imported media was found'),
       h('span', { class: 'none' }, 'Exclude a folder to leave it out of the index.')) : null,
