@@ -12,6 +12,7 @@ const { findOriginalsRoots, runLightroomCheck } = require('../core/lightroom');
 const { runFolderScan } = require('../core/folderscan');
 const { overview, listFiles } = require('../core/library');
 const { hashFile } = require('../core/util');
+const { setVolumes, syncDb } = require('../core/volumes');
 
 (async () => {
   const work = process.argv[2];
@@ -99,6 +100,49 @@ const { hashFile } = require('../core/util');
     t = Date.now();
     const lr = await runLightroomCheck(db, { cardId, letter: drive.letter, roots, maxFiles: Number(process.argv[5] || 40) }, job, () => {});
     console.log('lightroom check:', JSON.stringify(lr), `${Date.now() - t} ms`);
+  }
+
+  // Drive letters: a location is tied to its drive's serial, not its letter.
+  {
+    const work2 = path.join(work, 'letters');
+    const real = path.parse(path.resolve(work)).root.slice(0, 2).toUpperCase(); // e.g. "C:"
+    const SERIAL = 'TESTVOL1';
+    setVolumes([{ letter: real, serial: SERIAL, label: 'Test drive' }]);
+    assert.strictEqual(syncDb(db, [{ letter: real, serial: SERIAL, label: 'Test drive' }]), 0);
+    const r6 = await runImport(db, { cardId, letter: drive.letter, dates: [date], shoot: '', dest: work2, maxFiles: 1 }, job, () => {});
+    assert.strictEqual(r6.copied, 1);
+    const loc = db.prepare('SELECT * FROM locations WHERE path LIKE ?').get(`${work2}%`);
+    assert.strictEqual(loc.vol, SERIAL);
+    assert(loc.rel.startsWith('\\'));
+    const tied = db.prepare('SELECT count(*) n FROM locations WHERE vol = ?').get(SERIAL).n;
+    console.log(`drive letters: new copy tied to ${SERIAL}, ${tied} locations on that drive (older ones backfilled)`);
+
+    // The drive is unplugged: its copies are "not connected", not "missing", and the import knows it needs redoing.
+    setVolumes([]);
+    let f1 = listFiles(db, { cardId, date }).find((f) => f.id === loc.file_id);
+    let l1 = f1.locations.find((l) => l.path === loc.path);
+    assert(l1.offline && !l1.exists && /Test drive/.test(l1.drive));
+
+    // The drive comes back as Q: (which does not exist here): every path is re-lettered.
+    const moved = [{ letter: 'Q:', serial: SERIAL, label: 'Test drive' }];
+    setVolumes(moved);
+    const n = syncDb(db, moved);
+    assert.strictEqual(n, tied);
+    assert(db.prepare('SELECT path FROM locations WHERE id = ?').get(loc.id).path.startsWith('Q:\\'));
+    // Another drive now has the old letter: the old path must not be mistaken for the copy.
+    setVolumes([{ letter: real, serial: 'OTHERVOL', label: 'Someone else' }]);
+    f1 = listFiles(db, { cardId, date }).find((f) => f.id === loc.file_id);
+    assert(f1.locations.every((l) => l.vol !== SERIAL || (l.offline && !l.exists)));
+
+    // And back to the real letter: paths return and the files are found again.
+    const back = [{ letter: real, serial: SERIAL, label: 'Test drive' }];
+    setVolumes(back);
+    assert.strictEqual(syncDb(db, back), tied);
+    f1 = listFiles(db, { cardId, date }).find((f) => f.id === loc.file_id);
+    l1 = f1.locations.find((l) => l.path === loc.path);
+    assert(l1 && l1.exists && !l1.offline);
+    console.log(`drive letters: ${n} paths re-lettered to Q: and back; unplugged and swapped-letter cases handled`);
+    setVolumes([]);
   }
 
   const map = overview(db, '');

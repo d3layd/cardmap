@@ -3,9 +3,9 @@ const { contextBridge, ipcRenderer } = require('electron');
 const INVOKE = new Set([
   'cards', 'card:scan', 'card:summary', 'import:start', 'lightroom:start', 'folderscan:start',
   'job:cancel', 'map', 'files', 'card:rename', 'thumb', 'open', 'lightroom:pending', 'lightroom:open',
-  'lrcache:status', 'lrcache:albums', 'lrcache:refresh', 'settings:get', 'settings:set', 'pickFolder', 'reveal',
+  'library:folders', 'library:setFolders', 'lrcache:status', 'lrcache:albums', 'lrcache:refresh', 'settings:get', 'settings:set', 'pickFolder', 'reveal',
 ]);
-const EVENTS = new Set(['cards', 'job']);
+const EVENTS = new Set(['cards', 'job', 'volumes']);
 
 contextBridge.exposeInMainWorld('cardmap', {
   invoke: (channel, ...args) => {

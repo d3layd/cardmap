@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { pathExists } = require('./volumes');
 
 const MEDIA_EXT = new Set([
   // raw
@@ -91,6 +92,25 @@ async function hashFile(file, job, onBytes) {
   return hash.digest('hex');
 }
 
+/**
+ * Cheap fingerprint: SHA-256 of the first and last 64 KB. Two files with different
+ * fingerprints are certainly different, so the full read can be skipped. The same
+ * fingerprint is not proof of a match; that still needs the full checksum.
+ */
+async function quickHash(file, size) {
+  const n = Math.min(65536, size);
+  const fh = await fs.promises.open(file, 'r');
+  try {
+    const head = Buffer.alloc(n);
+    const tail = Buffer.alloc(n);
+    await fh.read(head, 0, n, 0);
+    await fh.read(tail, 0, n, Math.max(0, size - n));
+    return crypto.createHash('sha256').update(head).update(tail).digest('hex');
+  } finally {
+    await fh.close();
+  }
+}
+
 /** Returns a function that calls fn at most once per `ms`, plus .flush(). */
 function throttle(fn, ms) {
   let last = 0;
@@ -127,14 +147,17 @@ function pickFiles(opts) {
 
 function existsCache() {
   const cache = new Map();
-  return (p) => {
+  // vol: the drive the path was recorded on, if known. A path on a drive that is
+  // not connected does not exist right now, whatever is under that letter today.
+  return (p, vol) => {
     // A Lightroom catalog entry is not a path on disk; it counts as present.
-    if (p.startsWith('lightroom:') || p === LR_PLACE) return true;
-    if (!cache.has(p)) cache.set(p, fs.existsSync(p));
-    return cache.get(p);
+    if (p === LR_PLACE) return true;
+    const key = `${vol || ''}|${p}`;
+    if (!cache.has(key)) cache.set(key, pathExists(p, vol || null));
+    return cache.get(key);
   };
 }
 
 module.exports = {
-  MEDIA_EXT, Cancelled, localDate, shiftDate, nowIso, sanitizeName, isMedia, walkMedia, hashFile, throttle, existsCache, cardFolder, pickFiles, LR_PLACE,
+  MEDIA_EXT, Cancelled, localDate, shiftDate, nowIso, sanitizeName, isMedia, walkMedia, hashFile, quickHash, throttle, existsCache, cardFolder, pickFiles, LR_PLACE,
 };

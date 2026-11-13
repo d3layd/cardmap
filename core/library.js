@@ -1,5 +1,6 @@
 const path = require('node:path');
 const { albumsForAsset } = require('./lrcatalog');
+const { online, describe } = require('./volumes');
 const { existsCache, cardFolder, pickFiles, LR_PLACE } = require('./util');
 
 /**
@@ -20,7 +21,7 @@ function overview(db, q) {
     .all(...(like ? [like, like, like, like, like, like] : []));
 
   const locsByFile = new Map();
-  for (const l of db.prepare('SELECT file_id, kind, path, verified FROM locations').all()) {
+  for (const l of db.prepare('SELECT file_id, kind, path, vol, verified FROM locations').all()) {
     if (!locsByFile.has(l.file_id)) locsByFile.set(l.file_id, []);
     locsByFile.get(l.file_id).push(l);
   }
@@ -46,7 +47,12 @@ function overview(db, q) {
       const pk = `${l.kind}|${dir}`;
       if (!g.places.has(pk)) {
         const virtual = l.path.startsWith('lightroom:');
-        g.places.set(pk, { kind: l.kind, dir, count: 0, exists: virtual || exists(dir), virtual });
+        const offline = !virtual && !online(l.vol);
+        g.places.set(pk, {
+          kind: l.kind, dir, count: 0, virtual, offline,
+          exists: virtual || exists(dir, l.vol),
+          drive: offline ? describe(db, l.vol) : '',
+        });
       }
       g.places.get(pk).count += 1;
     }
@@ -84,7 +90,7 @@ function listFiles(db, q) {
       return []; // no Lightroom cache yet
     }
   };
-  const locs = db.prepare('SELECT kind, path, verified, verified_at FROM locations WHERE file_id = ? ORDER BY kind, path');
+  const locs = db.prepare('SELECT kind, path, vol, verified, verified_at FROM locations WHERE file_id = ? ORDER BY kind, path');
   return files
     .sort((a, b) => (a.rel_path < b.rel_path ? -1 : 1))
     .map((f) => ({
@@ -92,7 +98,10 @@ function listFiles(db, q) {
       date: f.capture_date, shoot: f.shoot, sha256: f.sha256, cardId: f.card_id,
       locations: locs.all(f.id).map((l) => ({
         ...l,
-        exists: exists(l.path),
+        exists: exists(l.path, l.vol),
+        // Its drive is not connected (as opposed to the file being gone).
+        offline: !l.path.startsWith('lightroom:') && !online(l.vol),
+        drive: !online(l.vol) ? describe(db, l.vol) : '',
         // For a Lightroom catalog match, the albums that photo is in.
         albums: l.path.startsWith('lightroom:') ? lrAlbums(l.path.slice('lightroom:'.length)) : undefined,
       })),

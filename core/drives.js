@@ -27,8 +27,24 @@ function queryDisks() {
  * Mounted camera cards: removable drives with media in them, plus any other
  * non-system drive that has a DCIM folder (some readers report as fixed disks).
  */
-async function listCardDrives() {
+/** Every volume connected right now, with the serial number that identifies it whatever its letter. */
+function volumesFrom(disks) {
+  return disks
+    .filter((d) => d.DeviceID && d.VolumeSerialNumber)
+    .map((d) => ({ letter: d.DeviceID, serial: d.VolumeSerialNumber, label: d.VolumeName || '' }));
+}
+
+/** One query for both: { cards, volumes }. */
+async function listDrives() {
   const disks = await queryDisks();
+  return { cards: cardsFrom(disks), volumes: volumesFrom(disks) };
+}
+
+async function listCardDrives() {
+  return cardsFrom(await queryDisks());
+}
+
+function cardsFrom(disks) {
   const out = [];
   for (const d of disks) {
     if (!d.DeviceID || !d.Size || !d.VolumeSerialNumber) continue;
@@ -48,4 +64,4 @@ async function listCardDrives() {
   return out;
 }
 
-module.exports = { listCardDrives };
+module.exports = { listCardDrives, listDrives };

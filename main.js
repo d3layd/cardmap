@@ -5,7 +5,8 @@ const { findCatalogs, refreshIndex, cacheStatus, albumsOverview } = require('./c
 const path = require('node:path');
 const fs = require('node:fs');
 const { openDb, getSettings, setSettings } = require('./core/db');
-const { listCardDrives } = require('./core/drives');
+const { listDrives } = require('./core/drives');
+const { setVolumes, syncDb, pin, currentPath, online, pathExists } = require('./core/volumes');
 const { scanCard, cardSummary } = require('./core/cards');
 const { runImport } = require('./core/importer');
 const { findOriginalsRoots, runLightroomCheck } = require('./core/lightroom');
@@ -24,16 +25,35 @@ const send = (channel, payload) => {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
 };
 
+let volumeKey = null;
 async function refreshDrives() {
   try {
-    const next = await listCardDrives();
-    const changed = JSON.stringify(next.map((d) => d.serial)) !== JSON.stringify(drives.map((d) => d.serial));
-    drives = next;
+    const { cards, volumes } = await listDrives();
+    // Drives are known by serial number, so a changed letter is noticed here and the
+    // recorded paths for that drive are rewritten to the new letter.
+    const key = JSON.stringify(volumes.map((v) => [v.serial, v.letter]));
+    if (key !== volumeKey) {
+      volumeKey = key;
+      setVolumes(volumes);
+      const moved = syncDb(db, volumes);
+      if (moved) send('volumes', { moved });
+    }
+    const changed = JSON.stringify(cards.map((d) => d.serial)) !== JSON.stringify(drives.map((d) => d.serial));
+    drives = cards;
     if (changed) send('cards', cardList());
   } catch {
     /* keep the last known list */
   }
 }
+
+// Folder settings are stored pinned to their drive, and read back at its current letter.
+const readPin = (json) => {
+  try {
+    return json ? JSON.parse(json) : null;
+  } catch {
+    return null;
+  }
+};
 
 function cardList() {
   const known = db.prepare('SELECT * FROM cards ORDER BY last_seen DESC').all();
@@ -98,7 +118,10 @@ function registerIpc() {
   ipcMain.handle('import:start', (_e, opts) => {
     const drive = driveFor(opts.cardId);
     if (!drive) throw new Error('Insert the card to import from it.');
-    setSettings(db, { dest: opts.dest || '', backup: opts.backup || '' });
+    setSettings(db, {
+      dest: opts.dest || '', backup: opts.backup || '',
+      destPin: opts.dest ? JSON.stringify(pin(opts.dest)) : '', backupPin: opts.backup ? JSON.stringify(pin(opts.backup)) : '',
+    });
     return startJob('import', (j, emit) => runImport(db, { ...opts, letter: drive.letter }, j, emit));
   });
 
@@ -109,9 +132,33 @@ function registerIpc() {
     );
   });
 
-  ipcMain.handle('folderscan:start', (_e, folder) => {
+  // Search folders on disk for copies of card files. arg: a folder path, or { folders, cardId }.
+  ipcMain.handle('folderscan:start', (_e, arg) => {
+    const opts = typeof arg === 'string' ? { folders: [arg] } : arg || {};
     const mounted = Object.fromEntries(drives.map((d) => [d.serial, d.letter]));
-    return startJob('folderscan', (j, emit) => runFolderScan(db, { folder, mounted }, j, emit));
+    return startJob('folderscan', (j, emit) => runFolderScan(db, { folders: opts.folders, cardId: opts.cardId || null, mounted }, j, emit));
+  });
+
+  // The folders the user keeps media in, remembered for "Find local copies".
+  // Each is pinned to its drive, so it still points at the right place if the letter changes.
+  const libraryFolders = () => {
+    let pins = [];
+    try {
+      pins = JSON.parse(getSettings(db).libraryFolders || '[]');
+    } catch {
+      pins = [];
+    }
+    return pins.map((p) => {
+      const pinned = typeof p === 'string' ? pin(p) : p;
+      const now = currentPath(pinned);
+      return { path: now, exists: online(pinned.vol) && fs.existsSync(now) };
+    });
+  };
+  ipcMain.handle('library:folders', libraryFolders);
+  ipcMain.handle('library:setFolders', (_e, list) => {
+    const clean = [...new Set((list || []).map((p) => String(p).trim()).filter(Boolean))];
+    setSettings(db, { libraryFolders: JSON.stringify(clean.map(pin)) });
+    return libraryFolders();
   });
 
   // The cached copy of Lightroom's catalog metadata.
@@ -160,11 +207,11 @@ function registerIpc() {
     const drive = driveFor(q.cardId);
     const pick = pickFiles(q);
     const inLr = db.prepare("SELECT 1 AS x FROM locations WHERE file_id = ? AND kind = 'lightroom' AND verified = 1");
-    const copies = db.prepare("SELECT path FROM locations WHERE file_id = ? AND kind != 'lightroom' AND verified = 1");
+    const copies = db.prepare("SELECT path, vol FROM locations WHERE file_id = ? AND kind != 'lightroom' AND verified = 1");
     const out = [];
     for (const f of db.prepare('SELECT * FROM files WHERE card_id = ? ORDER BY capture_date, rel_path').all(q.cardId)) {
       if ((pick && !pick(f)) || inLr.get(f.id)) continue;
-      const copy = copies.all(f.id).map((l) => l.path).find((p) => fs.existsSync(p));
+      const copy = (copies.all(f.id).find((l) => pathExists(l.path, l.vol)) || {}).path;
       const onCard = drive ? path.join(`${drive.letter}\\`, f.rel_path) : null;
       const p = copy || (onCard && fs.existsSync(onCard) ? onCard : null);
       if (p) out.push(p);
@@ -202,7 +249,17 @@ function registerIpc() {
     return cardList();
   });
 
-  const settingsOut = () => ({ ...getSettings(db), lightroomDetected: lightroomRoots(), lightroomCatalogs: findCatalogs('') });
+  const settingsOut = () => {
+    const s = getSettings(db);
+    return {
+      ...s,
+      // The remembered folders, at whatever letter their drive has today.
+      dest: currentPath(readPin(s.destPin)) || s.dest || '',
+      backup: currentPath(readPin(s.backupPin)) || s.backup || '',
+      lightroomDetected: lightroomRoots(),
+      lightroomCatalogs: findCatalogs(''),
+    };
+  };
   ipcMain.handle('settings:get', settingsOut);
   ipcMain.handle('settings:set', (_e, obj) => {
     setSettings(db, obj);

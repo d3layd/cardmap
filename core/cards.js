@@ -57,12 +57,12 @@ function cardSummary(db, cardId, presentIds) {
     files = files.filter((f) => set.has(f.id));
   }
   const locs = db
-    .prepare('SELECT l.file_id, l.kind, l.path, l.verified FROM locations l JOIN files f ON f.id = l.file_id WHERE f.card_id = ?')
+    .prepare('SELECT l.file_id, l.kind, l.path, l.vol, l.verified FROM locations l JOIN files f ON f.id = l.file_id WHERE f.card_id = ?')
     .all(cardId);
   const exists = existsCache();
   const byFile = new Map();
   for (const l of locs) {
-    if (!l.verified || !exists(l.path)) continue;
+    if (!l.verified || !exists(l.path, l.vol)) continue;
     if (!byFile.has(l.file_id)) byFile.set(l.file_id, []);
     byFile.get(l.file_id).push(l);
   }

@@ -3,6 +3,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { once } = require('node:events');
 const { addLocation } = require('./db');
+const { pathExists } = require('./volumes');
 const { hashFile, nowIso, sanitizeName, throttle, pickFiles, Cancelled } = require('./util');
 
 const PART = '.cardmap-part';
@@ -89,12 +90,12 @@ async function runImport(db, opts, job, emit) {
     .filter((f) => pick(f) && fs.existsSync(path.join(`${letter}\\`, f.rel_path)));
   if (opts.maxFiles) files = files.slice(0, opts.maxFiles);
 
-  const locStmt = db.prepare('SELECT path FROM locations WHERE file_id = ? AND kind = ? AND verified = 1');
+  const locStmt = db.prepare('SELECT path, vol FROM locations WHERE file_id = ? AND kind = ? AND verified = 1');
   // Work out what each file still needs.
   const work = [];
   let bytesTotal = 0;
   for (const f of files) {
-    const need = roots.filter((r) => !locStmt.all(f.id, r.kind).some((l) => fs.existsSync(l.path)));
+    const need = roots.filter((r) => !locStmt.all(f.id, r.kind).some((l) => pathExists(l.path, l.vol)));
     if (need.length) bytesTotal += f.size;
     work.push({ f, need });
   }

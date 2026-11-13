@@ -1,4 +1,5 @@
 const { DatabaseSync } = require('node:sqlite');
+const { pin } = require('./volumes');
 
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
@@ -73,6 +74,13 @@ function openDb(file) {
   if (!db.prepare('PRAGMA table_info(cards)').all().some((c) => c.name === 'nickname')) {
     db.exec('ALTER TABLE cards ADD COLUMN nickname TEXT');
   }
+  // Locations are tied to the drive they are on (vol = volume serial, rel = path within
+  // it), so they survive the drive coming back under a different letter. See volumes.js.
+  if (!db.prepare('PRAGMA table_info(locations)').all().some((c) => c.name === 'vol')) {
+    db.exec('ALTER TABLE locations ADD COLUMN vol TEXT; ALTER TABLE locations ADD COLUMN rel TEXT;');
+  }
+  db.exec(`CREATE TABLE IF NOT EXISTS volumes (serial TEXT PRIMARY KEY, label TEXT, last_letter TEXT, last_seen TEXT);
+           CREATE INDEX IF NOT EXISTS locations_vol ON locations (vol);`);
   return db;
 }
 
@@ -103,13 +111,16 @@ function setSettings(db, obj) {
 
 /** Record that a file lives at a path. Upserts on (file, path). */
 function addLocation(db, fileId, kind, p, verified, importId) {
+  const { vol, rel } = pin(p);
   db.prepare(
-    `INSERT INTO locations (file_id, kind, path, verified, verified_at, import_id)
-     VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO locations (file_id, kind, path, verified, verified_at, import_id, vol, rel)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(file_id, path) DO UPDATE SET
        verified = MAX(verified, excluded.verified),
-       verified_at = COALESCE(excluded.verified_at, verified_at)`
-  ).run(fileId, kind, p, verified ? 1 : 0, verified ? new Date().toISOString() : null, importId ?? null);
+       verified_at = COALESCE(excluded.verified_at, verified_at),
+       vol = COALESCE(excluded.vol, vol),
+       rel = COALESCE(excluded.rel, rel)`
+  ).run(fileId, kind, p, verified ? 1 : 0, verified ? new Date().toISOString() : null, importId ?? null, vol, rel);
 }
 
 module.exports = { openDb, tx, getSettings, setSettings, addLocation };

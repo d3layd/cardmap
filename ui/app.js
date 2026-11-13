@@ -179,6 +179,7 @@ function show(view) {
 // Development hook used by the screenshot aid in main.js.
 window.__show = (v) => {
   if (v.startsWith('import:')) { state.drawer = 'import'; return openMounted(v.slice(7)); }
+  if (v.startsWith('local:')) { state.drawer = 'local'; return openMounted(v.slice(6)); }
   if (v.startsWith('lr:')) { state.drawer = 'lightroom'; return openMounted(v.slice(3)); }
   if (v.startsWith('m:')) return openMounted(v.slice(2));
   if (v.startsWith('files:')) return openFiles(JSON.parse(v.slice(6)), 'Files', '');
@@ -190,6 +191,7 @@ function resultNotice() {
   const r = state.lastResult;
   if (!r) return null;
   if (r.error) return h('div', { class: 'notice bad' }, r.error);
+  if (r.info) return h('div', { class: 'notice' }, r.info);
   const x = r.result || {};
   let text = 'Done.';
   if (r.kind === 'import') {
@@ -206,8 +208,10 @@ function resultNotice() {
       ? `Lightroom's catalog was read: ${x.read.toLocaleString()} changed entries picked up. The cache now holds ${x.assets.toLocaleString()} photos and videos in ${x.albums.toLocaleString()} albums.`
       : 'Already up to date: Lightroom has not changed its catalog since the last read.';
   } else if (r.kind === 'folderscan') {
-    text = `Folder scan${x.cancelled ? ' cancelled' : ''}: ${x.scanned} files looked at, ${x.matched} new copies recorded, ${x.alreadyKnown} already known.`;
-    if (x.unverifiable) text += ` ${x.unverifiable} need their card inserted to confirm.`;
+    text = `Search${x.cancelled ? ' cancelled' : ' finished'}: ${x.scanned.toLocaleString()} files looked at. ${x.filesWithCopies} card file${x.filesWithCopies === 1 ? ' has' : 's have'} a matching local copy (${x.matched} newly recorded, ${x.alreadyKnown} already known).`;
+    if (x.renamed) text += ` ${x.renamed} of the new matches had a different file name.`;
+    if (x.unverifiable) text += ` ${x.unverifiable} possible matches need their card inserted to confirm.`;
+    if (x.skippedFolders && x.skippedFolders.length) text += ` Not connected, so skipped: ${x.skippedFolders.join(', ')}.`;
   }
   return h('div', { class: `notice${x.failed ? ' bad' : ''}` }, text,
     x.errors && x.errors.length ? h('ul', {}, x.errors.slice(0, 8).map((e) => h('li', {}, `${e.name}: ${e.message}`))) : null);
@@ -316,6 +320,52 @@ function importPanel(s, rows, keys, unit) {
       todo === 0 ? `Check ${count} files again` : `Copy and verify ${todo} file${todo === 1 ? '' : 's'}`));
 }
 
+/** The "Find local copies" panel: match this card's files to files already on your drives. */
+function localPanel(s) {
+  const list = h('div', { class: 'folderlist' });
+  const start = h('button', { class: 'btn primary wide', disabled: true,
+    onclick: () => run('folderscan:start', { folders: (state.libFolders || []).filter((f) => f.exists).map((f) => f.path), cardId: s.card.id }) },
+    'Search these folders');
+  const draw = () => {
+    const folders = state.libFolders || [];
+    list.replaceChildren(...(folders.length
+      ? folders.map((f) => h('div', { class: 'folderrow' },
+          h('span', { class: `dir${f.exists ? '' : ' missing'}` }, f.exists ? f.path : `${f.path} (not connected)`),
+          h('button', { class: 'link', 'aria-label': `Remove ${f.path}`, onclick: async () => {
+            state.libFolders = await api.invoke('library:setFolders', folders.filter((x) => x.path !== f.path).map((x) => x.path));
+            draw();
+          } }, 'Remove')))
+      : [h('div', { class: 'none' }, 'No folders yet. Add the folders or drives where you keep photos and video.')]));
+    start.disabled = busy() || !folders.some((f) => f.exists);
+  };
+  if (state.libFolders) draw();
+  api.invoke('library:folders').then((f) => { state.libFolders = f; draw(); });
+
+  return h('aside', { class: 'drawer', 'aria-label': 'Find local copies' },
+    h('div', { class: 'row' }, h('h2', {}, 'Find local copies'), h('span', { class: 'spacer' }),
+      h('button', { class: 'btn', onclick: () => { state.drawer = null; renderMain(); } }, 'Close')),
+
+    h('h3', {}, h('span', { class: 'step' }, '1'), 'What it does'),
+    h('ul', { class: 'steps' },
+      h('li', {}, `Looks through your folders for files that are the same as the ${s.totals.count} on this card.`),
+      h('li', {}, 'A file counts as a copy only when its contents match exactly, by checksum. The file name does not matter, so renamed copies are found.'),
+      h('li', {}, 'Nothing is copied, moved or changed. Matches are recorded and show up in the Copied column.')),
+
+    h('h3', {}, h('span', { class: 'step' }, '2'), 'Where to look'),
+    list,
+    h('button', { class: 'btn wide', onclick: async () => {
+      const p = await api.invoke('pickFolder', '');
+      if (!p) return;
+      state.libFolders = await api.invoke('library:setFolders', [...(state.libFolders || []).map((x) => x.path), p]);
+      draw();
+    } }, 'Add a folder or drive'),
+    h('div', { class: 'hint' }, 'These folders are remembered for next time. A whole drive works too, it just takes longer.'),
+
+    h('h3', {}, h('span', { class: 'step' }, '3'), 'Search'),
+    h('div', { class: 'hint' }, s.mounted ? 'Keep the card in: matching files are read from it to compare.' : 'The card is not connected, so only files CardMap has already read can be matched.'),
+    start);
+}
+
 /** The "Add to Lightroom" panel: drag the files onto Lightroom, then confirm against its catalog. */
 function lightroomPanel(s, rows, keys, unit) {
   const chosen = keys.length ? rows.filter((g) => state.sel.has(g.key)) : rows;
@@ -404,7 +454,9 @@ function locRow(l) {
           h('div', { class: 'none' }, l.albums && l.albums.length ? `Album: ${l.albums.join('; ')}` : 'Not in any album'))
       : l.exists
         ? h('button', { class: 'link dir', title: 'Open the folder', onclick: () => api.invoke('reveal', dirOf(l.path)) }, l.path)
-        : h('span', { class: 'dir missing' }, `${l.path} (not found now)`),
+        : l.offline
+          ? h('span', { class: 'dir offline' }, `${l.path} (not connected: ${l.drive})`)
+          : h('span', { class: 'dir missing' }, `${l.path} (not found now)`),
     h('span', { class: 'n' }, l.verified ? `${lr ? 'matched' : 'verified'} ${String(l.verified_at || '').slice(0, 10)}` : 'unverified'));
 }
 
@@ -448,6 +500,8 @@ function cardView() {
       h('span', { class: 'spacer' }),
       s.mounted ? h('button', { class: 'btn', disabled: busy(),
         onclick: () => run('lightroom:start', { cardId: s.card.id, ...(keys.length ? pick : {}) }) }, `Check Lightroom${sel}`) : null,
+      h('button', { class: 'btn', 'aria-expanded': String(state.drawer === 'local'),
+        onclick: () => { state.drawer = state.drawer === 'local' ? null : 'local'; renderMain(); } }, 'Find local copies'),
       h('button', { class: 'btn', 'aria-expanded': String(state.drawer === 'lightroom'),
         onclick: () => { state.drawer = state.drawer === 'lightroom' ? null : 'lightroom'; renderMain(); } }, `Add to Lightroom${sel}`),
       s.mounted ? h('button', { class: `btn primary`, 'aria-expanded': String(state.drawer === 'import'),
@@ -469,7 +523,8 @@ function cardView() {
       )))
     ),
   ]), s.mounted && state.drawer === 'import' ? importPanel(s, rows, keys, unit)
-    : state.drawer === 'lightroom' ? lightroomPanel(s, rows, keys, unit) : null)];
+    : state.drawer === 'lightroom' ? lightroomPanel(s, rows, keys, unit)
+    : state.drawer === 'local' ? localPanel(s) : null)];
 }
 
 function filesView() {
@@ -537,7 +592,9 @@ function mapView() {
                     ? h('span', { class: 'dir text' }, p.dir)
                     : p.exists
                       ? h('button', { class: 'link dir', title: 'Open this folder', onclick: () => api.invoke('reveal', p.dir) }, p.dir)
-                      : h('span', { class: 'dir missing' }, `${p.dir} (not found now)`),
+                      : p.offline
+                        ? h('span', { class: 'dir offline' }, `${p.dir} (not connected: ${p.drive})`)
+                        : h('span', { class: 'dir missing' }, `${p.dir} (not found now)`),
                   p.virtual
                     ? h('span', { class: 'n' }, `${p.count} of ${r.count} files`)
                     : h('button', { class: 'link n', title: 'See the files recorded in this folder', onclick: () =>
@@ -651,6 +708,15 @@ function render() {
 api.on('cards', (cards) => {
   state.cards = cards;
   renderSidebar();
+});
+
+// A drive has come back under a different letter and its saved locations were updated.
+api.on('volumes', async ({ moved }) => {
+  state.lastResult = { info: `A drive is connected under a different letter than before. ${moved} saved location${moved === 1 ? ' was' : 's were'} updated to the new letter.` };
+  await refreshSummary();
+  if (state.view === 'map') await loadMap();
+  if (state.view === 'files') state.files.rows = await api.invoke('files', state.files.query);
+  render();
 });
 
 api.on('job', async (p) => {
