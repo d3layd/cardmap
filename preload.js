@@ -1,0 +1,21 @@
+const { contextBridge, ipcRenderer } = require('electron');
+
+const INVOKE = new Set([
+  'cards', 'card:scan', 'card:summary', 'import:start', 'lightroom:start', 'folderscan:start',
+  'job:cancel', 'map', 'files', 'card:rename', 'thumb', 'open', 'lightroom:pending', 'lightroom:open',
+  'lrcache:status', 'lrcache:albums', 'lrcache:refresh', 'settings:get', 'settings:set', 'pickFolder', 'reveal',
+]);
+const EVENTS = new Set(['cards', 'job']);
+
+contextBridge.exposeInMainWorld('cardmap', {
+  invoke: (channel, ...args) => {
+    if (!INVOKE.has(channel)) throw new Error(`Unknown channel ${channel}`);
+    return ipcRenderer.invoke(channel, ...args);
+  },
+  on: (channel, fn) => {
+    if (!EVENTS.has(channel)) throw new Error(`Unknown event ${channel}`);
+    ipcRenderer.on(channel, (_e, payload) => fn(payload));
+  },
+  // Begin dragging the chosen files out of the window (for dropping onto Lightroom).
+  drag: (query) => ipcRenderer.send('drag', query),
+});
