@@ -37,6 +37,8 @@ function h(tag, props, ...kids) {
 }
 
 function bytes(n) {
+  if (!n) return '0 MB';
+  if (n >= 1e12) return `${(n / 1e12).toFixed(2)} TB`;
   if (n >= 1e9) return `${(n / 1e9).toFixed(1)} GB`;
   if (n >= 1e6) return `${(n / 1e6).toFixed(0)} MB`;
   return `${Math.max(1, Math.round(n / 1e3))} KB`;
@@ -157,6 +159,8 @@ function renderSidebar() {
       : h('div', { class: 'empty-note' }, 'Insert a card to import from it.'),
     h('div', { class: 'nav-title' }, 'Library'),
     h('button', { class: `nav-item${state.view === 'map' || (state.view === 'files' && state.files.back === 'map') ? ' active' : ''}`, onclick: () => show('map') }, h('span', { class: 'grow' }, 'Where things are')),
+    h('button', { class: `nav-item${state.view === 'index' ? ' active' : ''}`, onclick: () => show('index') },
+      h('span', { class: 'grow' }, 'Library index', h('div', { class: 'sub', id: 'navbg' }, state.bg ? `Indexing${state.bg.bytesTotal ? ` ${Math.floor((state.bg.bytesDone / state.bg.bytesTotal) * 100)}%` : ''}` : ''))),
     h('button', { class: `nav-item${state.view === 'lightroom' ? ' active' : ''}`, onclick: () => show('lightroom') }, h('span', { class: 'grow' }, 'Lightroom library')),
     h('button', { class: `nav-item${state.view === 'settings' ? ' active' : ''}`, onclick: () => show('settings') }, h('span', { class: 'grow' }, 'Settings')),
     past.length ? h('div', { class: 'nav-title' }, 'Earlier cards') : null,
@@ -174,6 +178,7 @@ function show(view) {
   state.lastResult = null;
   if (view === 'map') loadMap();
   if (view === 'lightroom') loadLightroom();
+  if (view === 'index') loadIndex();
   render();
 }
 // Development hook used by the screenshot aid in main.js.
@@ -203,6 +208,9 @@ function resultNotice() {
     text += x.method === 'catalog'
       ? ` Compared by checksum against ${x.catalogAssets} photos and videos in Lightroom's catalog.`
       : " Lightroom's catalog was not found, so only its local cache of recent files was checked.";
+  } else if (r.kind === 'inventory') {
+    text = `File list updated${x.cancelled ? ' (stopped early)' : ''}: ${x.files.toLocaleString()} files, ${bytes(x.bytes)}. ${x.added.toLocaleString()} new, ${x.changed.toLocaleString()} changed, ${x.removed.toLocaleString()} no longer there.`;
+    if (x.skippedFolders && x.skippedFolders.length) text += ` Not connected, so skipped: ${x.skippedFolders.join(', ')}.`;
   } else if (r.kind === 'lrcache') {
     text = x.changed
       ? `Lightroom's catalog was read: ${x.read.toLocaleString()} changed entries picked up. The cache now holds ${x.assets.toLocaleString()} photos and videos in ${x.albums.toLocaleString()} albums.`
@@ -210,6 +218,7 @@ function resultNotice() {
   } else if (r.kind === 'folderscan') {
     text = `Search${x.cancelled ? ' cancelled' : ' finished'}: ${x.scanned.toLocaleString()} files looked at. ${x.filesWithCopies} card file${x.filesWithCopies === 1 ? ' has' : 's have'} a matching local copy (${x.matched} newly recorded, ${x.alreadyKnown} already known).`;
     if (x.renamed) text += ` ${x.renamed} of the new matches had a different file name.`;
+    if (x.lookups != null) text += ` ${x.lookups} were matched straight from the index; ${x.read} local files had to be read.`;
     if (x.unverifiable) text += ` ${x.unverifiable} possible matches need their card inserted to confirm.`;
     if (x.skippedFolders && x.skippedFolders.length) text += ` Not connected, so skipped: ${x.skippedFolders.join(', ')}.`;
   }
@@ -349,6 +358,7 @@ function localPanel(s) {
     h('ul', { class: 'steps' },
       h('li', {}, `Looks through your folders for files that are the same as the ${s.totals.count} on this card.`),
       h('li', {}, 'A file counts as a copy only when its contents match exactly, by checksum. The file name does not matter, so renamed copies are found.'),
+      h('li', {}, 'Files already in the library index are matched instantly. Others are read once and their checksum is saved for next time.'),
       h('li', {}, 'Nothing is copied, moved or changed. Matches are recorded and show up in the Copied column.')),
 
     h('h3', {}, h('span', { class: 'step' }, '2'), 'Where to look'),
@@ -625,6 +635,110 @@ function settingsView() {
   ];
 }
 
+// ---------- library index ----------
+async function loadIndex() {
+  state.index = await api.invoke('index:status');
+  state.libFolders = state.index.folders.map((f) => ({ path: f.path, exists: f.exists }));
+  if (state.view === 'index') renderMain();
+}
+
+function bgLine(p) {
+  if (!p) return '';
+  const pct = p.bytesTotal ? ` ${Math.floor((p.bytesDone / p.bytesTotal) * 100)}%` : '';
+  const count = p.filesTotal ? ` · file ${(p.filesDone || 0).toLocaleString()} of ${p.filesTotal.toLocaleString()}` : '';
+  const size = p.bytesTotal ? ` · ${bytes(p.bytesDone)} of ${bytes(p.bytesTotal)} read this run` : '';
+  return `${p.label || 'Working'}${pct}${count}${size}`;
+}
+
+function indexView() {
+  const ix = state.index;
+  if (!ix) return [h('h1', {}, 'Library index'), h('p', { class: 'lede' }, 'Loading')];
+  const pct = ix.bytes ? Math.floor((ix.hashedBytes / ix.bytes) * 100) : 0;
+  const left = ix.files - ix.hashed - ix.failed;
+  const anyDrive = ix.drives.some((d) => d.selected);
+  const canRun = anyDrive || ix.folders.some((f) => f.exists);
+  const setFolders = async (list) => {
+    await api.invoke('library:setFolders', list);
+    await loadIndex();
+  };
+  const pctOf = (g) => h('span', { class: g.hashedBytes >= g.bytes ? 'ok' : g.hashedBytes ? 'part' : 'none' }, `${Math.floor((g.hashedBytes / (g.bytes || 1)) * 100)}%`);
+  return [
+    h('h1', {}, 'Library index'),
+    h('p', { class: 'lede' }, 'Finds the photos and video you imported from cameras, drones and phones, and saves a checksum for each. Once a file is indexed, matching it to a card is an instant lookup. Nothing on your drives is changed.'),
+    resultNotice(),
+    h('div', { class: 'card-box' },
+      !ix.files
+        ? h('div', {}, 'Nothing found yet. Tick the drives to look through, then press "Scan for imported media".')
+        : h('div', {},
+            h('strong', {}, `${ix.files.toLocaleString()} imported photos and videos found`), ` (${bytes(ix.bytes)}). `,
+            `${ix.hashed.toLocaleString()} indexed so far (${bytes(ix.hashedBytes)}, ${pct}%).`,
+            left ? ` ${left.toLocaleString()} still to read.` : ' Everything is indexed.',
+            ix.failed ? ` ${ix.failed} could not be read.` : ''),
+      ix.files ? h('div', { class: 'usage wide' }, h('progress', { max: ix.bytes || 1, value: ix.hashedBytes, 'aria-label': `${pct}% indexed` })) : null,
+      ix.duplicateGroups ? h('div', { class: 'hint' }, `Among indexed files, ${ix.duplicateGroups.toLocaleString()} exist in more than one place. The extra copies take ${bytes(ix.duplicateBytes)}.`) : null,
+      h('div', { class: 'hint', id: 'bgline' }, ix.running ? bgLine(state.bg || ix.progress) : ''),
+      h('div', { class: 'row actions' },
+        ix.running
+          ? h('button', { class: 'btn primary', onclick: async () => { await api.invoke('index:stop'); } }, 'Pause')
+          : [
+              h('button', { class: 'btn', disabled: !canRun, title: 'Quick: lists folders and looks at file names, types and sizes. Reads no file contents.',
+                onclick: async () => { await api.invoke('index:scan'); await loadIndex(); } }, 'Scan for imported media'),
+              h('button', { class: 'btn primary', disabled: !canRun, title: 'Scans, then reads every found file that has no checksum yet. Slow the first time; you can pause and carry on later.',
+                onclick: async () => { await api.invoke('index:start'); await loadIndex(); } }, ix.hashed ? 'Continue indexing' : 'Start indexing'),
+            ]),
+      h('div', { class: 'hint' }, 'The scan takes a few minutes and runs in the background. Indexing reads each found file once, so the first pass can take many hours; it pauses by itself while an import or a check is running, carries on where it left off, and only re-reads a file if its size or date changes.')),
+
+    h('div', { class: 'row toolbar' }, h('strong', {}, 'Drives to scan')),
+    ix.drives.length
+      ? h('div', { class: 'checks' }, ix.drives.map((d) => h('label', { class: 'check' },
+          h('input', { type: 'checkbox', checked: d.selected, disabled: ix.running, onchange: async (e) => {
+            const next = ix.drives.filter((x) => (x.serial === d.serial ? e.target.checked : x.selected)).map((x) => x.serial);
+            await api.invoke('index:setDrives', next);
+            await loadIndex();
+          } }),
+          `${d.letter} ${d.label || 'no name'}`)))
+      : h('p', { class: 'lede' }, 'No drives found.'),
+    h('div', { class: 'hint' }, 'Kept: raw files anywhere, and JPGs and videos with camera, drone or phone file names or names like the ones in your Lightroom library. Left out: screenshots, screen recordings, PNGs and other graphics, stock, exports and finals, caches, small web images, and program folders.'),
+
+    ix.found.length ? h('div', { class: 'row toolbar spaced' }, h('strong', {}, 'Where imported media was found'),
+      h('span', { class: 'none' }, 'Exclude a folder to leave it out of the index.')) : null,
+    ix.found.length
+      ? h('table', {},
+          h('thead', {}, h('tr', {}, h('th', {}, 'Folder'), h('th', { class: 'num' }, 'Files'), h('th', { class: 'num' }, 'Size'),
+            h('th', { class: 'num' }, 'Raw'), h('th', { class: 'num' }, 'Photos'), h('th', { class: 'num' }, 'Videos'), h('th', {}, 'Indexed'), h('th', {}, ''))),
+          h('tbody', {}, ix.found.map((g) => h('tr', {},
+            h('td', {}, g.online
+              ? h('button', { class: 'link dir', title: 'Open this folder', onclick: () => api.invoke('reveal', g.path) }, g.path)
+              : h('span', { class: 'offline' }, g.path)),
+            h('td', { class: 'num' }, g.files.toLocaleString()), h('td', { class: 'num' }, bytes(g.bytes)),
+            h('td', { class: 'num' }, g.raw || ''), h('td', { class: 'num' }, g.still || ''), h('td', { class: 'num' }, g.video || ''),
+            h('td', {}, pctOf(g)),
+            h('td', {}, g.online && /\\[^\\]+/.test(g.path.slice(2)) ? h('button', { class: 'link', 'aria-label': `Exclude ${g.path}`, disabled: ix.running,
+              onclick: async () => { await api.invoke('index:exclude', g.path); await loadIndex(); } }, 'Exclude') : null)))))
+      : null,
+
+    ix.excluded.length ? h('div', { class: 'row toolbar spaced' }, h('strong', {}, 'Excluded folders')) : null,
+    ix.excluded.length ? h('div', { class: 'folderlist' }, ix.excluded.map((p) => h('div', { class: 'folderrow' },
+      h('span', { class: 'dir' }, p),
+      h('button', { class: 'link', 'aria-label': `Include ${p} again`, onclick: async () => { await api.invoke('index:include', p); await loadIndex(); } }, 'Include again')))) : null,
+
+    h('div', { class: 'row toolbar spaced' }, h('strong', {}, 'Extra folders'), h('span', { class: 'none' }, 'Every photo and video in these is indexed, whatever its name.'), h('span', { class: 'spacer' }),
+      h('button', { class: 'btn', onclick: async () => {
+        const p = await api.invoke('pickFolder', '');
+        if (p) setFolders([...ix.folders.map((f) => f.path), p]);
+      } }, 'Add a folder')),
+    ix.folders.length
+      ? h('table', {},
+          h('thead', {}, h('tr', {}, h('th', {}, 'Folder'), h('th', { class: 'num' }, 'Files'), h('th', { class: 'num' }, 'Size'), h('th', {}, 'Indexed'), h('th', {}, ''))),
+          h('tbody', {}, ix.folders.map((f) => h('tr', {},
+            h('td', {}, f.exists ? f.path : h('span', { class: 'offline' }, `${f.path} (not connected)`)),
+            h('td', { class: 'num' }, f.files.toLocaleString()), h('td', { class: 'num' }, f.files ? bytes(f.bytes) : ''),
+            h('td', {}, f.files ? pctOf(f) : h('span', { class: 'none' }, 'Not listed yet')),
+            h('td', {}, h('button', { class: 'link', 'aria-label': `Remove ${f.path}`, onclick: () => setFolders(ix.folders.filter((x) => x.path !== f.path).map((x) => x.path)) }, 'Remove'))))))
+      : h('p', { class: 'lede' }, 'None. Use this for a folder whose files the scan would not recognise.'),
+  ];
+}
+
 async function loadLightroom() {
   const [status, albums] = await Promise.all([api.invoke('lrcache:status'), api.invoke('lrcache:albums')]);
   state.lr = { status, albums };
@@ -678,7 +792,7 @@ function welcomeView() {
 }
 
 function renderMain() {
-  const views = { card: cardView, files: filesView, map: mapView, lightroom: lightroomView, settings: settingsView, welcome: welcomeView };
+  const views = { card: cardView, files: filesView, map: mapView, index: indexView, lightroom: lightroomView, settings: settingsView, welcome: welcomeView };
   document.getElementById('main').replaceChildren(...views[state.view]().flat(Infinity).filter(Boolean));
 }
 
@@ -710,6 +824,36 @@ api.on('cards', (cards) => {
   renderSidebar();
 });
 
+// Progress from the background indexer. Updates two small bits of text in place, so
+// the page does not jump while you are using it.
+api.on('bg', async (p) => {
+  if (p.done) {
+    state.bg = null;
+    const x = p.result;
+    if (p.error && p.error !== 'Stopped') state.lastResult = { error: `Indexing stopped: ${p.error}` };
+    else if (x && x.scanOnly && state.view === 'index') {
+      state.lastResult = { info: `Scan ${x.cancelled ? 'stopped early' : 'finished'}: ${x.files.toLocaleString()} imported photos and videos found (${bytes(x.bytes)}). ${x.leftOut.toLocaleString()} other photo and video files were left out as screenshots, exports, stock or junk.` };
+    } else if (x && state.view === 'index') {
+      state.lastResult = { info: `Indexing ${x.cancelled ? 'paused' : 'finished'}: ${x.hashed.toLocaleString()} files (${bytes(x.bytes)}) read this run.`
+        + (x.linked ? ` ${x.linked} turned out to be copies of card files and were recorded.` : '')
+        + (x.offline ? ` ${x.offline.toLocaleString()} are on drives that are not connected.` : '')
+        + (x.failed ? ` ${x.failed} could not be read.` : '') };
+    }
+    renderSidebar();
+    if (state.view === 'index') await loadIndex();
+    await refreshSummary();
+    if (state.view === 'card') renderMain();
+    return;
+  }
+  const first = !state.bg;
+  state.bg = p;
+  const nav = document.getElementById('navbg');
+  if (nav) nav.textContent = `${p.paused ? 'Paused' : 'Indexing'}${p.bytesTotal ? ` ${Math.floor((p.bytesDone / p.bytesTotal) * 100)}%` : ''}`;
+  const line = document.getElementById('bgline');
+  if (line) line.textContent = bgLine(p);
+  if (first && state.view === 'index') loadIndex();
+});
+
 // A drive has come back under a different letter and its saved locations were updated.
 api.on('volumes', async ({ moved }) => {
   state.lastResult = { info: `A drive is connected under a different letter than before. ${moved} saved location${moved === 1 ? ' was' : 's were'} updated to the new letter.` };
@@ -726,6 +870,7 @@ api.on('job', async (p) => {
     await refreshSummary();
     if (state.view === 'map') await loadMap();
     if (state.view === 'lightroom') await loadLightroom();
+    if (state.view === 'index') await loadIndex();
     if (state.view === 'files') state.files.rows = await api.invoke('files', state.files.query);
     render();
     return;

@@ -13,6 +13,7 @@ const { runFolderScan } = require('../core/folderscan');
 const { overview, listFiles } = require('../core/library');
 const { hashFile } = require('../core/util');
 const { setVolumes, syncDb } = require('../core/volumes');
+const { inventory, hashPending, matchCards, indexStatus } = require('../core/libindex');
 
 (async () => {
   const work = process.argv[2];
@@ -100,6 +101,36 @@ const { setVolumes, syncDb } = require('../core/volumes');
     t = Date.now();
     const lr = await runLightroomCheck(db, { cardId, letter: drive.letter, roots, maxFiles: Number(process.argv[5] || 40) }, job, () => {});
     console.log('lightroom check:', JSON.stringify(lr), `${Date.now() - t} ms`);
+  }
+
+  // Library index: list a folder, save checksums, then match by lookup with nothing read.
+  {
+    const lib = path.join(work, 'backup');
+    const inv1 = await inventory(db, [lib, path.join(work, 'nope')], job, () => {});
+    console.log('index inventory:', JSON.stringify(inv1));
+    assert(inv1.files >= 3 && inv1.skippedFolders.length === 1);
+    const st1 = indexStatus(db, [{ path: lib, exists: true }]);
+    const h1 = await hashPending(db, { shouldPause: () => false }, job, () => {});
+    const st2 = indexStatus(db, [{ path: lib, exists: true }]);
+    console.log('index hashing:', JSON.stringify(h1), `| indexed ${st1.hashed} -> ${st2.hashed} of ${st2.files}, folder ${st2.folders[0].files} files`);
+    assert.strictEqual(st2.hashed, st2.files);
+    assert.strictEqual(st2.folders[0].hashedBytes, st2.folders[0].bytes);
+    // Everything is indexed now, so a second pass has nothing to read...
+    assert.strictEqual((await hashPending(db, {}, job, () => {})).total, 0);
+    // ...and matching is pure lookup.
+    const m1 = await matchCards(db, { cardId, mounted: {} }, job, () => {});
+    console.log('index match (card not needed):', JSON.stringify(m1));
+    assert.strictEqual(m1.read, 0);
+    assert(m1.lookups >= 3 && m1.filesWithCopies >= 3);
+    // A changed file loses its checksum and is read again; a deleted one leaves the index.
+    const victim2 = fs.readdirSync(path.join(lib, fs.readdirSync(lib)[0])).map((n) => path.join(lib, fs.readdirSync(lib)[0], n)).find((p) => p.endsWith('.JPG'));
+    fs.appendFileSync(victim2, 'x');
+    const inv2 = await inventory(db, [lib], job, () => {});
+    assert.strictEqual(inv2.changed, 1);
+    fs.unlinkSync(victim2);
+    const inv3 = await inventory(db, [lib], job, () => {});
+    assert.strictEqual(inv3.removed, 1);
+    console.log(`index upkeep: changed file re-queued (${inv2.changed}), deleted file dropped (${inv3.removed})`);
   }
 
   // Drive letters: a location is tied to its drive's serial, not its letter.

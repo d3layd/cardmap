@@ -10,7 +10,7 @@ const { setVolumes, syncDb, pin, currentPath, online, pathExists } = require('./
 const { scanCard, cardSummary } = require('./core/cards');
 const { runImport } = require('./core/importer');
 const { findOriginalsRoots, runLightroomCheck } = require('./core/lightroom');
-const { runFolderScan } = require('./core/folderscan');
+const { runFolderScan, inventory, hashPending, indexStatus, discover, foundFolders, dropScanned } = require('./core/libindex');
 const { overview, listFiles } = require('./core/library');
 
 let win = null;
@@ -25,6 +25,12 @@ const send = (channel, payload) => {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
 };
 
+// The background indexer has its own slot, separate from the one-at-a-time task above.
+let bg = null;
+let bgProgress = null;
+let startIndexing = () => {};
+
+let volumesNow = []; // every connected volume: { letter, serial, label }
 let volumeKey = null;
 async function refreshDrives() {
   try {
@@ -34,6 +40,7 @@ async function refreshDrives() {
     const key = JSON.stringify(volumes.map((v) => [v.serial, v.letter]));
     if (key !== volumeKey) {
       volumeKey = key;
+      volumesNow = volumes;
       setVolumes(volumes);
       const moved = syncDb(db, volumes);
       if (moved) send('volumes', { moved });
@@ -155,6 +162,90 @@ function registerIpc() {
     });
   };
   ipcMain.handle('library:folders', libraryFolders);
+
+  // ----- The library index: saved checksums for the files in those folders -----
+  const onlineFolders = () => libraryFolders().filter((f) => f.exists).map((f) => f.path);
+  // Which drives the imported-media scan covers (by drive ID), and folders left out of it.
+  const scanSerials = () => {
+    try {
+      return JSON.parse(getSettings(db).indexDrives || '[]');
+    } catch {
+      return [];
+    }
+  };
+  const excludedPins = () => {
+    try {
+      return JSON.parse(getSettings(db).indexExcludes || '[]');
+    } catch {
+      return [];
+    }
+  };
+  const cardSerials = () => new Set(drives.map((d) => d.serial));
+  const scanRoots = () => volumesNow.filter((v) => scanSerials().includes(v.serial) && !cardSerials().has(v.serial)).map((v) => `${v.letter}\\`);
+
+  ipcMain.handle('index:status', () => ({
+    ...indexStatus(db, libraryFolders()),
+    running: Boolean(bg),
+    progress: bgProgress,
+    // Every connected drive except camera cards; ticked ones are scanned.
+    drives: volumesNow.filter((v) => !cardSerials().has(v.serial)).map((v) => ({ ...v, selected: scanSerials().includes(v.serial) })),
+    found: foundFolders(db).slice(0, 80).map((g) => ({ ...g, path: g.path || `${g.rel} (drive not connected)` })),
+    excluded: excludedPins().map((p) => currentPath(p)),
+  }));
+  ipcMain.handle('index:setDrives', (_e, serials) => setSettings(db, { indexDrives: JSON.stringify([...new Set(serials || [])]) }));
+  ipcMain.handle('index:exclude', (_e, folder) => {
+    const pins = excludedPins().filter((p) => currentPath(p).toLowerCase() !== String(folder).toLowerCase());
+    pins.push(pin(folder));
+    setSettings(db, { indexExcludes: JSON.stringify(pins) });
+    return dropScanned(db, folder);
+  });
+  ipcMain.handle('index:include', (_e, folder) => {
+    setSettings(db, { indexExcludes: JSON.stringify(excludedPins().filter((p) => currentPath(p).toLowerCase() !== String(folder).toLowerCase())) });
+  });
+
+  // Quick: list the extra folders and note sizes and dates. Reads no file contents.
+  ipcMain.handle('index:inventory', () => startJob('inventory', (j, emit) => inventory(db, onlineFolders(), j, emit)));
+
+  // The background pipeline. It runs beside other work and stands aside whenever
+  // another task (an import, a check) is running.
+  //   1. scan the ticked drives for imported camera media (names and sizes only);
+  //   2. list the extra folders;
+  //   3. if asked, read every file that has no checksum yet (the slow part).
+  startIndexing = (withChecksums = true) => {
+    if (bg) return;
+    const j = { cancelled: false };
+    bg = j;
+    bgProgress = { label: 'Starting' };
+    if (withChecksums) setSettings(db, { libIndexAuto: '1' });
+    const emit = (p) => {
+      bgProgress = p;
+      send('bg', p);
+    };
+    (async () => {
+      const scan = await discover(db, scanRoots(), { excluded: excludedPins().map((p) => currentPath(p)) }, j, emit);
+      if (j.cancelled) return { ...scan, scanOnly: true, cancelled: true };
+      await inventory(db, onlineFolders(), j, emit);
+      if (!withChecksums) return { ...scan, scanOnly: true };
+      return { scan, ...(await hashPending(db, { shouldPause: () => Boolean(job) }, j, emit)) };
+    })()
+      .then(
+        (result) => ({ result }),
+        (e) => ({ error: e.cancelled ? 'Stopped' : e.message })
+      )
+      .then((out) => {
+        bg = null;
+        bgProgress = null;
+        // Finished everything it could reach: nothing to resume next launch.
+        if (out.result && !out.result.cancelled && !out.result.scanOnly) setSettings(db, { libIndexAuto: '' });
+        send('bg', { done: true, ...out });
+      });
+  };
+  ipcMain.handle('index:start', () => startIndexing(true));
+  ipcMain.handle('index:scan', () => startIndexing(false));
+  ipcMain.handle('index:stop', () => {
+    setSettings(db, { libIndexAuto: '' });
+    if (bg) bg.cancelled = true;
+  });
   ipcMain.handle('library:setFolders', (_e, list) => {
     const clean = [...new Set((list || []).map((p) => String(p).trim()).filter(Boolean))];
     setSettings(db, { libraryFolders: JSON.stringify(clean.map(pin)) });
@@ -341,6 +432,10 @@ app.whenReady().then(() => {
         /* another task started first; the next Lightroom check will refresh it */
       }
     }, 4000);
+    // Carry on indexing the library if it was still going when the app was last closed.
+    setTimeout(() => {
+      if (getSettings(db).libIndexAuto === '1') startIndexing();
+    }, 9000);
   }
 });
 

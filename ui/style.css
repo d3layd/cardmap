@@ -106,6 +106,8 @@ code { font: 12px ui-monospace, Consolas, monospace; color: var(--muted); }
 .usage { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; margin: -8px 0 16px; }
 .usage progress { width: 260px; height: 10px; }
 .usage progress.full { accent-color: var(--bad); }
+.usage.wide { margin: 10px 0 4px; }
+.usage.wide progress { width: 100%; }
 .usage.compact { margin: 3px 0 0; gap: 7px; font-size: 12px; }
 .usage.compact progress { width: 70px; height: 6px; flex: none; }
 
@@ -190,3 +192,8 @@ tr.clickable:hover td { background: var(--panel); }
 #jobbar .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #jobbar .count { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 progress { width: 220px; height: 8px; accent-color: var(--accent); }
+
+/* Library index */
+.checks { display: flex; flex-wrap: wrap; gap: 8px 22px; margin-bottom: 8px; }
+label.check { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
+.row.toolbar.spaced { margin-top: 22px; }
