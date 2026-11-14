@@ -37,6 +37,10 @@ function ensure(db) {
   if (!db.prepare('PRAGMA table_info(lib_files)').all().some((c) => c.name === 'src')) {
     db.exec("ALTER TABLE lib_files ADD COLUMN src TEXT NOT NULL DEFAULT 'folder'; ALTER TABLE lib_files ADD COLUMN kind TEXT;");
   }
+  // When the checksum was last read from the file itself.
+  if (!db.prepare('PRAGMA table_info(lib_files)').all().some((c) => c.name === 'hashed_at')) {
+    db.exec('ALTER TABLE lib_files ADD COLUMN hashed_at TEXT');
+  }
 }
 
 /** Returns save(batch): adds new files, keeps checksums of unchanged ones, re-queues changed ones. */
@@ -46,7 +50,7 @@ function recorder(db, stamp, src, res) {
   // A file in a folder the user added stays "folder" even if a scan also finds it.
   const touch = db.prepare("UPDATE lib_files SET seen = ?, src = CASE WHEN ? = 'folder' THEN 'folder' ELSE src END, kind = COALESCE(?, kind) WHERE id = ?");
   const reset = db.prepare(
-    "UPDATE lib_files SET size = ?, mtime_ms = ?, sha256 = NULL, quick = NULL, failed = 0, seen = ?, src = CASE WHEN ? = 'folder' THEN 'folder' ELSE src END, kind = COALESCE(?, kind) WHERE id = ?"
+    "UPDATE lib_files SET size = ?, mtime_ms = ?, sha256 = NULL, hashed_at = NULL, quick = NULL, failed = 0, seen = ?, src = CASE WHEN ? = 'folder' THEN 'folder' ELSE src END, kind = COALESCE(?, kind) WHERE id = ?"
   );
   return (batch) => {
     if (!batch.length) return;
@@ -332,7 +336,7 @@ async function matchCards(db, opts, job, emit) {
   const unhashed = db.prepare('SELECT * FROM lib_files WHERE size = ? AND sha256 IS NULL AND failed = 0');
   const setCardSha = db.prepare('UPDATE files SET sha256 = ? WHERE id = ?');
   const setQuick = db.prepare('UPDATE lib_files SET quick = ? WHERE id = ?');
-  const setSha = db.prepare('UPDATE lib_files SET sha256 = ? WHERE id = ?');
+  const setSha = db.prepare("UPDATE lib_files SET sha256 = ?, hashed_at = datetime('now') WHERE id = ?");
   const setFailed = db.prepare('UPDATE lib_files SET failed = 1 WHERE id = ?');
   const progress = throttle(emit || (() => {}), 150);
   let done = 0;
@@ -406,7 +410,7 @@ async function hashPending(db, opts, job, emit) {
     .all();
   const res = { hashed: 0, bytes: 0, failed: 0, offline: 0, linked: 0, total: rows.length };
   const bytesTotal = rows.reduce((n, r) => n + r.size, 0);
-  const setSha = db.prepare('UPDATE lib_files SET sha256 = ? WHERE id = ?');
+  const setSha = db.prepare("UPDATE lib_files SET sha256 = ?, hashed_at = datetime('now') WHERE id = ?");
   const setFailed = db.prepare('UPDATE lib_files SET failed = 1 WHERE id = ?');
   const cardFiles = db.prepare('SELECT * FROM files WHERE sha256 = ?');
   const progress = throttle(emit || (() => {}), 400);

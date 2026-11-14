@@ -231,3 +231,12 @@ th.sortable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2
 .lookupbar input[type=search] { max-width: 520px; font-size: 15px; padding: 9px 11px; }
 .places .place .kind { width: 84px; }
 .place.unconfirmed .dir { opacity: .8; font-style: italic; }
+
+/* Duplicates */
+ul.tally { margin: 10px 0 6px; padding-left: 18px; }
+ul.tally li { margin-bottom: 6px; color: var(--muted); }
+ul.tally li strong { color: var(--text); }
+.seg.tabs { margin: 18px 0 10px; flex-wrap: wrap; }
+.seg.tabs .btn { border-radius: 0; margin-left: -1px; }
+.seg.tabs .btn:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+.seg.tabs .btn:last-child { border-radius: 0 6px 6px 0; }

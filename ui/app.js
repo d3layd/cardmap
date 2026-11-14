@@ -162,6 +162,7 @@ function renderSidebar() {
     h('button', { class: `nav-item${state.view === 'map' || (state.view === 'files' && state.files.back === 'map') ? ' active' : ''}`, onclick: () => show('map') }, h('span', { class: 'grow' }, 'Where things are')),
     h('button', { class: `nav-item${state.view === 'index' ? ' active' : ''}`, onclick: () => show('index') },
       h('span', { class: 'grow' }, 'Library index', h('div', { class: 'sub', id: 'navbg' }, state.bg ? `Indexing${state.bg.bytesTotal ? ` ${Math.floor((state.bg.bytesDone / state.bg.bytesTotal) * 100)}%` : ''}` : ''))),
+    h('button', { class: `nav-item${state.view === 'dupes' ? ' active' : ''}`, onclick: () => show('dupes') }, h('span', { class: 'grow' }, 'Duplicates')),
     h('button', { class: `nav-item${state.view === 'lightroom' ? ' active' : ''}`, onclick: () => show('lightroom') }, h('span', { class: 'grow' }, 'Lightroom library')),
     h('button', { class: `nav-item${state.view === 'settings' ? ' active' : ''}`, onclick: () => show('settings') }, h('span', { class: 'grow' }, 'Settings')),
     past.length ? h('div', { class: 'nav-title' }, 'Earlier cards') : null,
@@ -180,11 +181,13 @@ function show(view) {
   if (view === 'map') loadMap();
   if (view === 'lightroom') loadLightroom();
   if (view === 'index') loadIndex();
+  if (view === 'dupes') loadDupes(true);
   render();
 }
 // Development hook used by the screenshot aid in main.js.
 window.__show = (v) => {
   if (v.startsWith('import:')) { state.drawer = 'import'; return openMounted(v.slice(7)); }
+  if (v.startsWith('dupes:')) { state.dupeTab = v.slice(6); return show('dupes'); }
   if (v.startsWith('lookup:')) { state.lookup = { q: v.slice(7), res: null }; show('lookup'); return runLookup(); }
   if (v === 'rules') { state.rulesOpen = true; return show('index'); }
   if (v.startsWith('local:')) { state.drawer = 'local'; return openMounted(v.slice(6)); }
@@ -211,6 +214,13 @@ function resultNotice() {
     text += x.method === 'catalog'
       ? ` Compared by checksum against ${x.catalogAssets} photos and videos in Lightroom's catalog.`
       : " Lightroom's catalog was not found, so only its local cache of recent files was checked.";
+  } else if (r.kind === 'dupes') {
+    text = `Report built: ${bytes(x.safeBytes)} safe to delete, ${bytes(x.oneDiskBytes)} of extra copies on one disk.`;
+  } else if (r.kind === 'recheck') {
+    text = `Re-checked ${x.checked.toLocaleString()} copies: ${x.same.toLocaleString()} still match.`;
+    if (x.changed) text += ` ${x.changed} no longer match and have been taken off the lists: ${x.changedPaths.slice(0, 5).join('; ')}${x.changedPaths.length > 5 ? ' and more' : ''}.`;
+    if (x.unreadable) text += ` ${x.unreadable} could not be read.`;
+    text += ' The report has been rebuilt.';
   } else if (r.kind === 'inventory') {
     text = `File list updated${x.cancelled ? ' (stopped early)' : ''}: ${x.files.toLocaleString()} files, ${bytes(x.bytes)}. ${x.added.toLocaleString()} new, ${x.changed.toLocaleString()} changed, ${x.removed.toLocaleString()} no longer there.`;
     if (x.skippedFolders && x.skippedFolders.length) text += ` Not connected, so skipped: ${x.skippedFolders.join(', ')}.`;
@@ -922,7 +932,7 @@ function welcomeView() {
 }
 
 function renderMain() {
-  const views = { lookup: lookupView, card: cardView, files: filesView, map: mapView, index: indexView, lightroom: lightroomView, settings: settingsView, welcome: welcomeView };
+  const views = { dupes: dupesView, lookup: lookupView, card: cardView, files: filesView, map: mapView, index: indexView, lightroom: lightroomView, settings: settingsView, welcome: welcomeView };
   document.getElementById('main').replaceChildren(...views[state.view]().flat(Infinity).filter(Boolean));
 }
 
@@ -1001,6 +1011,8 @@ api.on('job', async (p) => {
     if (state.view === 'map') await loadMap();
     if (state.view === 'lightroom') await loadLightroom();
     if (state.view === 'index') await loadIndex();
+    if (p.kind === 'dupes' || state.view === 'dupes') await loadDupes(false);
+    if (p.kind === 'recheck' && !p.error && !(p.result && p.result.cancelled)) { render(); run('dupes:build'); return; }
     if (state.view === 'files') state.files.rows = await api.invoke('files', state.files.query);
     render();
     return;

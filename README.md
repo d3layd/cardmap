@@ -10,6 +10,9 @@ A little tool I'm building to help with managing media: keeping track of my file
 - **Matches card files to local files.** It can search your folders for files that are identical to the ones on a card, even if they were renamed.
 - **Checks Lightroom.** It reads Lightroom's catalog (read-only) and tells you which card files are already in your Lightroom library.
 - **Says when a card is safe to format:** only when every file on it has at least two verified copies.
+- **Finds a file anywhere:** one search across cards, your folders and Lightroom, showing every place a file is.
+- **Shows duplicates** across your drives, and lists extra copies that are safe to delete: each file must stay in at least two places on different physical disks, and copies next to a video project are kept. It never deletes anything itself.
+- **Every table sorts, filters and exports to CSV.**
 
 ## Running it
 

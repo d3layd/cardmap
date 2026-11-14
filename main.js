@@ -53,7 +53,8 @@ function dailyBackup() {
     console.error('CardMap backup failed:', e.message);
   }
 }
-const { listDrives } = require('./core/drives');
+const { listDrives, physicalDrives } = require('./core/drives');
+const { buildReport, recheck } = require('./core/dupes');
 const { setVolumes, syncDb, pin, currentPath, online, pathExists } = require('./core/volumes');
 const { scanCard, cardSummary } = require('./core/cards');
 const { runImport } = require('./core/importer');
@@ -352,6 +353,48 @@ function registerIpc() {
     setSettings(db, { libraryFolders: JSON.stringify(clean.map(pin)) });
     return libraryFolders();
   });
+
+  // ----- Duplicates and the safe-to-delete list -----
+  let dupeReport = null;
+  // Drives holding indexed files, in the order they keep their copies. The default puts
+  // the drive with the most indexed data first.
+  const dupeSettings = () => {
+    const s = getSettings(db);
+    let order = [];
+    try {
+      order = JSON.parse(s.dupOrder || '[]');
+    } catch {
+      order = [];
+    }
+    const vols = db.prepare('SELECT vol, sum(size) AS b FROM lib_files GROUP BY vol ORDER BY b DESC').all().map((r) => r.vol);
+    const full = [...order.filter((v) => vols.includes(v)), ...vols.filter((v) => !order.includes(v))];
+    const info = db.prepare('SELECT label, last_letter FROM volumes WHERE serial = ?');
+    return {
+      countLightroom: s.dupCountLightroom !== '0',
+      order: full.map((v) => {
+        const now = volumesNow.find((x) => x.serial === v);
+        const known = info.get(v) || {};
+        return { serial: v, letter: now ? now.letter : known.last_letter || '?', label: (now && now.label) || known.label || '', connected: Boolean(now) };
+      }),
+    };
+  };
+  ipcMain.handle('dupes:get', () => ({ report: dupeReport, settings: dupeSettings() }));
+  ipcMain.handle('dupes:settings', (_e, { order, countLightroom }) => {
+    const set = {};
+    if (order) set.dupOrder = JSON.stringify(order);
+    if (countLightroom != null) set.dupCountLightroom = countLightroom ? '1' : '0';
+    setSettings(db, set);
+    return dupeSettings();
+  });
+  ipcMain.handle('dupes:build', () => startJob('dupes', async (j, emit) => {
+    emit({ label: 'Finding which drives are on the same physical disk' });
+    const phys = await physicalDrives();
+    const st = dupeSettings();
+    const priority = Object.fromEntries(st.order.map((o, i) => [o.serial, i]));
+    dupeReport = await buildReport(db, phys, { priority, countLightroom: st.countLightroom }, j, emit);
+    return dupeReport.totals;
+  }));
+  ipcMain.handle('dupes:recheck', (_e, shas) => startJob('recheck', (j, emit) => recheck(db, shas || [], j, emit)));
 
   // The cached copy of Lightroom's catalog metadata.
   ipcMain.handle('lrcache:status', () => cacheStatus(db, findCatalogs('')));
