@@ -215,3 +215,19 @@ code.big { font-size: 13px; color: var(--text); }
 /* Settings: data location */
 h2.section { font-size: 16px; font-weight: 600; margin: 26px 0 10px; }
 .dbpath { margin: 8px 0 4px; flex-wrap: wrap; }
+
+/* Sortable, filterable tables */
+.gridbar { margin-bottom: 8px; flex-wrap: nowrap; }
+.gridbar input[type=search] { max-width: 280px; }
+.gridcount { white-space: nowrap; font-size: 12px; }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--text); }
+th.sortable::after { content: attr(data-arrow); margin-left: 5px; font-size: 10px; color: var(--accent); }
+th.sortable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.grid + .grid, .grid { margin-bottom: 18px; }
+
+/* File lookup */
+.lookupbar { margin-bottom: 14px; }
+.lookupbar input[type=search] { max-width: 520px; font-size: 15px; padding: 9px 11px; }
+.places .place .kind { width: 84px; }
+.place.unconfirmed .dir { opacity: .8; font-style: italic; }

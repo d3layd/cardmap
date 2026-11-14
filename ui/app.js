@@ -55,7 +55,7 @@ function dateTime(ms) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-const KIND = { primary: 'Main copy', backup: 'Backup', lightroom: 'Lightroom', found: 'Found' };
+const KIND = { primary: 'Main copy', backup: 'Backup', lightroom: 'Lightroom', found: 'Found', card: 'On card', index: 'In folder' };
 const busy = () => Boolean(state.job);
 const cardName = (c) => c.nickname || c.label || 'Untitled';
 const dirOf = (p) => p.slice(0, p.lastIndexOf('\\'));
@@ -158,6 +158,7 @@ function renderSidebar() {
         )
       : h('div', { class: 'empty-note' }, 'Insert a card to import from it.'),
     h('div', { class: 'nav-title' }, 'Library'),
+    h('button', { class: `nav-item${state.view === 'lookup' ? ' active' : ''}`, onclick: () => show('lookup') }, h('span', { class: 'grow' }, 'Find a file')),
     h('button', { class: `nav-item${state.view === 'map' || (state.view === 'files' && state.files.back === 'map') ? ' active' : ''}`, onclick: () => show('map') }, h('span', { class: 'grow' }, 'Where things are')),
     h('button', { class: `nav-item${state.view === 'index' ? ' active' : ''}`, onclick: () => show('index') },
       h('span', { class: 'grow' }, 'Library index', h('div', { class: 'sub', id: 'navbg' }, state.bg ? `Indexing${state.bg.bytesTotal ? ` ${Math.floor((state.bg.bytesDone / state.bg.bytesTotal) * 100)}%` : ''}` : ''))),
@@ -184,6 +185,7 @@ function show(view) {
 // Development hook used by the screenshot aid in main.js.
 window.__show = (v) => {
   if (v.startsWith('import:')) { state.drawer = 'import'; return openMounted(v.slice(7)); }
+  if (v.startsWith('lookup:')) { state.lookup = { q: v.slice(7), res: null }; show('lookup'); return runLookup(); }
   if (v === 'rules') { state.rulesOpen = true; return show('index'); }
   if (v.startsWith('local:')) { state.drawer = 'local'; return openMounted(v.slice(6)); }
   if (v.startsWith('lr:')) { state.drawer = 'lightroom'; return openMounted(v.slice(3)); }
@@ -517,22 +519,22 @@ function cardView() {
         onclick: () => { state.drawer = state.drawer === 'lightroom' ? null : 'lightroom'; renderMain(); } }, `Add to Lightroom${sel}`),
       s.mounted ? h('button', { class: `btn primary`, 'aria-expanded': String(state.drawer === 'import'),
         onclick: () => { state.drawer = state.drawer === 'import' ? null : 'import'; renderMain(); } }, `Import${sel}`) : null),
-    h('table', {},
-      h('thead', {}, h('tr', {},
-        h('th', { class: 'check' }, s.mounted ? h('input', { type: 'checkbox', checked: allSel, 'aria-label': `Select all ${unit}s`,
-          onchange: (e) => { state.sel = new Set(e.target.checked ? rows.map((g) => g.key) : []); renderMain(); } }) : null),
-        h('th', {}, byDate ? 'Date' : 'Card folder'), h('th', {}, byDate ? 'Shoot' : 'Dates'), h('th', { class: 'num' }, 'Files'), h('th', { class: 'num' }, 'Size'),
-        h('th', {}, 'Copied'), h('th', {}, 'In Lightroom'), h('th', {}, '2+ verified copies'))),
-      h('tbody', {}, rows.map((g) => h('tr', {},
-        h('td', { class: 'check' }, s.mounted ? h('input', { type: 'checkbox', checked: state.sel.has(g.key), 'aria-label': `Select ${g.key}`,
-          onchange: (e) => { e.target.checked ? state.sel.add(g.key) : state.sel.delete(g.key); renderMain(); } }) : null),
-        h('td', { class: 'date' }, h('button', { class: 'link', onclick: () =>
-          openFiles(byDate ? { cardId: s.card.id, date: g.key } : { cardId: s.card.id, folder: g.key }, g.key, `${title}, ${byDate ? 'taken on this date' : 'in this card folder'}`) }, g.key)),
-        h('td', {}, byDate ? g.shoots.join(', ') : g.firstDate === g.lastDate ? g.firstDate : `${g.firstDate} to ${g.lastDate}`),
-        h('td', { class: 'num' }, g.count), h('td', { class: 'num' }, bytes(g.bytes)),
-        h('td', {}, tally(g.copied, g.count)), h('td', {}, tally(g.lightroom, g.count)), h('td', {}, tally(g.safe, g.count))
-      )))
-    ),
+    grid(`card-${unit}`, [
+      { label: s.mounted ? h('input', { type: 'checkbox', checked: allSel, 'aria-label': `Select all ${unit}s shown`,
+          // "Select all" means all the rows the filter is showing.
+          onchange: (e) => { const shown = gridVisible(`card-${unit}`, rows); for (const g of shown) { if (e.target.checked) state.sel.add(g.key); else state.sel.delete(g.key); } renderMain(); } }) : '',
+        sort: false, csv: false, cls: 'check',
+        cell: (g) => (s.mounted ? h('input', { type: 'checkbox', checked: state.sel.has(g.key), 'aria-label': `Select ${g.key}`,
+          onchange: (e) => { if (e.target.checked) state.sel.add(g.key); else state.sel.delete(g.key); renderMain(); } }) : null) },
+      { label: byDate ? 'Date' : 'Card folder', cls: 'date', value: (g) => g.key, cell: (g) => h('button', { class: 'link', onclick: () =>
+          openFiles(byDate ? { cardId: s.card.id, date: g.key } : { cardId: s.card.id, folder: g.key }, g.key, `${title}, ${byDate ? 'taken on this date' : 'in this card folder'}`) }, g.key) },
+      { label: byDate ? 'Shoot' : 'Dates', cell: (g) => (byDate ? g.shoots.join(', ') : g.firstDate === g.lastDate ? g.firstDate : `${g.firstDate} to ${g.lastDate}`) },
+      { label: 'Files', num: true, value: (g) => g.count, cell: (g) => g.count },
+      { label: 'Size', num: true, value: (g) => g.bytes, cell: (g) => bytes(g.bytes) },
+      { label: 'Copied', num: true, value: (g) => g.copied, text: (g) => `${g.copied} of ${g.count}`, cell: (g) => tally(g.copied, g.count) },
+      { label: 'In Lightroom', num: true, value: (g) => g.lightroom, text: (g) => `${g.lightroom} of ${g.count}`, cell: (g) => tally(g.lightroom, g.count) },
+      { label: '2+ verified copies', num: true, value: (g) => g.safe, text: (g) => `${g.safe} of ${g.count}`, cell: (g) => tally(g.safe, g.count) },
+    ], rows, { name: `${cardName(s.card)} by ${unit}` }),
   ]), s.mounted && state.drawer === 'import' ? importPanel(s, rows, keys, unit)
     : state.drawer === 'lightroom' ? lightroomPanel(s, rows, keys, unit)
     : state.drawer === 'local' ? localPanel(s) : null)];
@@ -547,23 +549,17 @@ function filesView() {
       h('button', { class: 'btn', onclick: async () => { state.view = f.back; if (f.back === 'map') await loadMap(); render(); } }, 'Back'),
       h('h1', {}, f.title)),
     h('p', { class: 'lede' }, rows ? `${rows.length} file${rows.length === 1 ? '' : 's'}, ${bytes(total)}. ${f.sub || ''}` : 'Loading'),
-    rows && h('table', { class: 'files' },
-      h('thead', {}, h('tr', {},
-        h('th', {}, 'Preview'), h('th', {}, 'File'), h('th', {}, 'Card folder'), h('th', { class: 'num' }, 'Size'), h('th', {}, 'Taken'),
-        h('th', {}, 'Checksum'), h('th', {}, 'Copies'))),
-      h('tbody', {}, rows.map((r) => h('tr', {},
-        h('td', { class: 'thumbcell' }, thumb(r)),
-        h('td', {}, r.name, r.shoot ? h('div', { class: 'none' }, r.shoot) : null,
-          r.openPath ? h('div', {}, h('button', { class: 'link', onclick: () => openFile(r.openPath) }, 'Open')) : null),
-        h('td', {}, r.folder),
-        h('td', { class: 'num' }, bytes(r.size)),
-        h('td', { class: 'date' }, dateTime(r.mtime)),
-        h('td', {}, r.sha256 ? h('code', { title: `SHA-256: ${r.sha256}` }, r.sha256.slice(0, 12)) : h('span', { class: 'none' }, 'Not read yet')),
-        h('td', {}, r.locations.length
-          ? r.locations.map(locRow)
-          : h('span', { class: 'none' }, 'Only on the card'))
-      )))
-    ),
+    rows && grid('files', [
+      { label: 'Preview', sort: false, csv: false, cls: 'thumbcell', cell: (r) => thumb(r) },
+      { label: 'File', value: (r) => r.name, text: (r) => [r.name, r.shoot].filter(Boolean).join(' · '), cell: (r) => [r.name, r.shoot ? h('div', { class: 'none' }, r.shoot) : null,
+        r.openPath ? h('div', {}, h('button', { class: 'link', onclick: () => openFile(r.openPath) }, 'Open')) : null] },
+      { label: 'Card folder', cell: (r) => r.folder },
+      { label: 'Size', num: true, value: (r) => r.size, text: (r) => r.size, cell: (r) => bytes(r.size) },
+      { label: 'Taken', cls: 'date', value: (r) => r.mtime, text: (r) => dateTime(r.mtime), cell: (r) => dateTime(r.mtime) },
+      { label: 'Checksum', value: (r) => r.sha256 || '', cell: (r) => (r.sha256 ? h('code', { title: `SHA-256: ${r.sha256}` }, r.sha256.slice(0, 12)) : h('span', { class: 'none' }, 'Not read yet')) },
+      { label: 'Copies', num: false, value: (r) => r.locations.length, text: (r) => r.locations.map((l) => `${KIND[l.kind] || l.kind}: ${l.path}`).join('; '),
+        cell: (r) => (r.locations.length ? r.locations.map(locRow) : h('span', { class: 'none' }, 'Only on the card')) },
+    ], rows, { name: f.title, cls: 'files' }),
   ];
 }
 
@@ -573,30 +569,17 @@ function mapView() {
     h('h1', {}, 'Where things are'),
     h('p', { class: 'lede' }, 'Every date from every card, and each folder those files were verified in. Click a date or a file count to see the files.'),
     resultNotice(),
-    h('div', { class: 'row toolbar' },
-      h('input', { type: 'search', id: 'mapq', value: state.mapQuery, placeholder: 'Search by file name, shoot, date, card or folder',
-        'aria-label': 'Search the map',
-        onkeydown: (e) => { if (e.key === 'Enter') { state.mapQuery = e.target.value.trim(); loadMap(); } } }),
-      h('button', { class: 'btn', onclick: () => { state.mapQuery = document.getElementById('mapq').value.trim(); loadMap(); } }, 'Search'),
-      h('span', { class: 'spacer' }),
-      h('button', { class: 'btn', disabled: busy(), onclick: async () => {
-        const p = await api.invoke('pickFolder', state.form.dest);
-        if (p) run('folderscan:start', p);
-      } }, 'Find existing copies in a folder')
-    ),
     !rows
       ? h('p', { class: 'lede' }, 'Loading')
-      : !rows.length
-        ? h('p', { class: 'lede' }, state.mapQuery ? 'Nothing matches that search.' : 'Nothing recorded yet. Open a connected card to start.')
-        : h('table', {},
-            h('thead', {}, h('tr', {}, h('th', {}, 'Date'), h('th', {}, 'Shoot'), h('th', {}, 'Card'), h('th', { class: 'num' }, 'Files'), h('th', { class: 'num' }, 'Size'), h('th', {}, 'Where'))),
-            h('tbody', {}, rows.map((r) => h('tr', {},
-              h('td', { class: 'date' }, h('button', { class: 'link', onclick: () =>
-                openFiles({ cardId: r.cardId, date: r.date }, r.date, `From ${r.cardLabel} (${r.cardSerial}).`) }, r.date)),
-              h('td', {}, r.shoots.join(', ')),
-              h('td', {}, r.cardLabel, h('div', { class: 'none' }, r.cardSerial)),
-              h('td', { class: 'num' }, r.count), h('td', { class: 'num' }, bytes(r.bytes)),
-              h('td', {},
+      : grid('map', [
+          { label: 'Date', cls: 'date', value: (r) => r.date, cell: (r) => h('button', { class: 'link', onclick: () =>
+            openFiles({ cardId: r.cardId, date: r.date }, r.date, `From ${r.cardLabel} (${r.cardSerial}).`) }, r.date) },
+          { label: 'Shoot', cell: (r) => r.shoots.join(', ') },
+          { label: 'Card', value: (r) => r.cardLabel, text: (r) => `${r.cardLabel} ${r.cardSerial}`, cell: (r) => [r.cardLabel, h('div', { class: 'none' }, r.cardSerial)] },
+          { label: 'Files', num: true, value: (r) => r.count, cell: (r) => r.count },
+          { label: 'Size', num: true, value: (r) => r.bytes, cell: (r) => bytes(r.bytes) },
+          { label: 'Where', value: (r) => r.places.length, text: (r) => [...r.places.map((p) => `${KIND[p.kind] || p.kind}: ${p.dir} (${p.count} of ${r.count})`), r.unplaced ? `${r.unplaced} only on the card` : ''].filter(Boolean).join('; '),
+            cell: (r) => [
                 r.places.map((p) => h('div', { class: 'place' },
                   h('span', { class: 'kind' }, KIND[p.kind] || p.kind),
                   p.virtual
@@ -610,9 +593,15 @@ function mapView() {
                     ? h('span', { class: 'n' }, `${p.count} of ${r.count} files`)
                     : h('button', { class: 'link n', title: 'See the files recorded in this folder', onclick: () =>
                         openFiles({ dir: p.dir }, p.dir.slice(p.dir.lastIndexOf('\\') + 1), p.dir) }, `${p.count} of ${r.count} files`))),
-                r.unplaced ? h('div', { class: 'none' }, `${r.unplaced} only on the card so far`) : null)
-            )))
-          ),
+                r.unplaced ? h('div', { class: 'none' }, `${r.unplaced} only on the card so far`) : null] },
+        ], rows, {
+          name: 'Where things are',
+          empty: 'Nothing recorded yet. Open a connected card to start.',
+          tools: h('button', { class: 'btn', disabled: busy(), onclick: async () => {
+            const p = await api.invoke('pickFolder', state.form.dest);
+            if (p) run('folderscan:start', p);
+          } }, 'Find existing copies in a folder'),
+        }),
   ];
 }
 
@@ -777,18 +766,19 @@ function indexView() {
     ix.found.length ? h('div', { class: 'row toolbar spaced' }, h('strong', {}, 'Where imported media was found'),
       h('span', { class: 'none' }, 'Exclude a folder to leave it out of the index.')) : null,
     ix.found.length
-      ? h('table', {},
-          h('thead', {}, h('tr', {}, h('th', {}, 'Folder'), h('th', { class: 'num' }, 'Files'), h('th', { class: 'num' }, 'Size'),
-            h('th', { class: 'num' }, 'Raw'), h('th', { class: 'num' }, 'Photos'), h('th', { class: 'num' }, 'Videos'), h('th', {}, 'Indexed'), h('th', {}, ''))),
-          h('tbody', {}, ix.found.map((g) => h('tr', {},
-            h('td', {}, g.online
-              ? h('button', { class: 'link dir', title: 'Open this folder', onclick: () => api.invoke('reveal', g.path) }, g.path)
-              : h('span', { class: 'offline' }, g.path)),
-            h('td', { class: 'num' }, g.files.toLocaleString()), h('td', { class: 'num' }, bytes(g.bytes)),
-            h('td', { class: 'num' }, g.raw || ''), h('td', { class: 'num' }, g.still || ''), h('td', { class: 'num' }, g.video || ''),
-            h('td', {}, pctOf(g)),
-            h('td', {}, g.online && /\\[^\\]+/.test(g.path.slice(2)) ? h('button', { class: 'link', 'aria-label': `Exclude ${g.path}`, disabled: ix.running,
-              onclick: async () => { await api.invoke('index:exclude', g.path); await loadIndex(); } }, 'Exclude') : null)))))
+      ? grid('found', [
+          { label: 'Folder', value: (g) => g.path, cell: (g) => (g.online
+            ? h('button', { class: 'link dir', title: 'Open this folder', onclick: () => api.invoke('reveal', g.path) }, g.path)
+            : h('span', { class: 'offline' }, g.path)) },
+          { label: 'Files', num: true, value: (g) => g.files, cell: (g) => g.files.toLocaleString() },
+          { label: 'Size', num: true, value: (g) => g.bytes, cell: (g) => bytes(g.bytes) },
+          { label: 'Raw', num: true, value: (g) => g.raw, cell: (g) => g.raw || '' },
+          { label: 'Photos', num: true, value: (g) => g.still, cell: (g) => g.still || '' },
+          { label: 'Videos', num: true, value: (g) => g.video, cell: (g) => g.video || '' },
+          { label: 'Indexed', num: true, value: (g) => Math.floor((g.hashedBytes / (g.bytes || 1)) * 100), text: (g) => `${Math.floor((g.hashedBytes / (g.bytes || 1)) * 100)}%`, cell: pctOf },
+          { label: '', sort: false, csv: false, cell: (g) => (g.online && /\\[^\\]+/.test(g.path.slice(2)) ? h('button', { class: 'link', 'aria-label': `Exclude ${g.path}`, disabled: ix.running,
+            onclick: async () => { await api.invoke('index:exclude', g.path); await loadIndex(); } }, 'Exclude') : null) },
+        ], ix.found, { name: 'Imported media by folder', sort: { col: 2, dir: -1 } })
       : null,
 
     ix.excluded.length ? h('div', { class: 'row toolbar spaced' }, h('strong', {}, 'Excluded folders')) : null,
@@ -824,8 +814,7 @@ function lightroomView() {
   if (!lr) return [h('h1', {}, 'Lightroom library'), h('p', { class: 'lede' }, 'Loading')];
   const st = lr.status;
   const when = st.refreshedAt ? dateTime(Date.parse(st.refreshedAt)) : null;
-  const q = (state.lrQuery || '').toLowerCase();
-  const albums = q ? lr.albums.filter((a) => a.path.toLowerCase().includes(q)) : lr.albums;
+  const albums = lr.albums;
   return [
     h('h1', {}, 'Lightroom library'),
     h('p', { class: 'lede' }, 'A copy of the details in Lightroom\'s catalog, kept by CardMap. Details only: no pictures and no edits. Lightroom\'s own files are never changed.'),
@@ -843,18 +832,85 @@ function lightroomView() {
         h('button', { class: 'btn primary', disabled: busy() || !st.catalogs.length, onclick: () => run('lrcache:refresh', false) }, st.assets ? 'Refresh' : 'Read the catalog'),
         h('button', { class: 'btn', disabled: busy() || !st.catalogs.length, title: 'Throw the cached copy away and read everything again',
           onclick: () => run('lrcache:refresh', true) }, 'Rebuild from scratch'))),
-    st.assets ? h('div', { class: 'row toolbar' },
-      h('input', { type: 'search', value: state.lrQuery || '', placeholder: 'Filter albums by name', 'aria-label': 'Filter albums',
-        oninput: (e) => { state.lrQuery = e.target.value; clearTimeout(state.lrTimer); state.lrTimer = setTimeout(() => {
-          renderMain(); const el = document.querySelector('.toolbar input[type=search]'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
-        }, 250); } }),
-      h('span', { class: 'none' }, `${albums.length} album${albums.length === 1 ? '' : 's'}`)) : null,
-    st.assets ? h('table', {},
-      h('thead', {}, h('tr', {}, h('th', {}, 'Album'), h('th', { class: 'num' }, 'Photos'), h('th', { class: 'num' }, 'Originals'), h('th', {}, 'Taken'))),
-      h('tbody', {}, albums.slice(0, 400).map((a) => h('tr', {},
-        h('td', {}, a.path), h('td', { class: 'num' }, a.count), h('td', { class: 'num' }, a.count ? bytes(a.bytes) : ''),
-        h('td', { class: 'date' }, !a.first ? '' : a.first === a.last ? a.first : `${a.first} to ${a.last}`))))) : null,
-    albums.length > 400 ? h('p', { class: 'lede' }, `Showing the first 400 of ${albums.length}. Filter to narrow it down.`) : null,
+    st.assets ? grid('albums', [
+      { label: 'Album', cell: (a) => a.path },
+      { label: 'Photos', num: true, value: (a) => a.count, cell: (a) => a.count.toLocaleString() },
+      { label: 'Originals', num: true, value: (a) => a.bytes, text: (a) => a.bytes, cell: (a) => (a.count ? bytes(a.bytes) : '') },
+      { label: 'First taken', cls: 'date', value: (a) => a.first || '', cell: (a) => a.first || '' },
+      { label: 'Last taken', cls: 'date', value: (a) => a.last || '', cell: (a) => a.last || '' },
+    ], albums, { name: 'Lightroom albums', sort: { col: 4, dir: -1 } }) : null,
+  ];
+}
+
+// ---------- find a file ----------
+async function runLookup() {
+  const L = state.lookup;
+  const q = L.q.trim();
+  const seq = (L.seq = (L.seq || 0) + 1);
+  if (q.length < 2) {
+    L.res = null;
+    drawLookup();
+    return;
+  }
+  L.busy = true;
+  drawLookup();
+  const res = await api.invoke('lookup', q);
+  if (seq !== L.seq) return; // a newer search has started
+  L.res = res;
+  L.busy = false;
+  drawLookup();
+}
+
+function placeRow(p) {
+  return h('div', { class: `place${p.unconfirmed ? ' unconfirmed' : ''}`, title: p.unconfirmed ? 'Same file name and size as the other copies, but the contents have not been compared yet' : null },
+    h('span', { class: 'kind' }, KIND[p.kind] || p.kind),
+    p.kind === 'lightroom'
+      ? h('span', { class: 'dir text' }, p.label)
+      : p.exists && p.path
+        ? h('button', { class: 'link dir', title: 'Open the folder', onclick: () => api.invoke('reveal', dirOf(p.path)) }, p.kind === 'card' ? p.label : p.path)
+        : p.offline
+          ? h('span', { class: 'dir offline' }, p.kind === 'card' ? `${p.label} (card not inserted)` : `${p.label} (not connected: ${p.drive})`)
+          : h('span', { class: 'dir missing' }, `${p.label} (not found now)`),
+    p.unconfirmed ? h('span', { class: 'n' }, 'name and size match, not compared') : null);
+}
+
+/** Draw just the results, so typing in the search box is never interrupted. */
+function drawLookup() {
+  const box = document.getElementById('lookupres');
+  if (!box) return;
+  const L = state.lookup;
+  if (!L.res) {
+    box.replaceChildren(h('p', { class: 'lede' }, L.busy ? 'Searching' : 'Type at least two characters.'));
+    return;
+  }
+  const r = L.res;
+  box.replaceChildren(...[
+    r.truncated ? h('div', { class: 'notice' }, 'Lots of matches: only the first ones are shown. Type more to narrow it down.') : null,
+    grid('lookup', [
+      { label: 'File', value: (g) => g.names[0], text: (g) => g.names.join(' / '), cell: (g) => [g.names.join(' / '),
+        g.openPath ? h('div', {}, h('button', { class: 'link', onclick: () => openFile(g.openPath) }, 'Open')) : null] },
+      { label: 'Size', num: true, value: (g) => g.size, cell: (g) => (g.size ? bytes(g.size) : '') },
+      { label: 'Date', cls: 'date', value: (g) => g.date || '', cell: (g) => g.date || '' },
+      { label: 'Checksum', value: (g) => g.sha256 || '', cell: (g) => (g.sha256 ? h('code', { title: `SHA-256: ${g.sha256}` }, g.sha256.slice(0, 12)) : h('span', { class: 'none' }, 'Not read yet')) },
+      { label: 'Copies', num: true, value: (g) => g.copies, cell: (g) => g.copies },
+      { label: 'Where', value: (g) => g.places.length, text: (g) => g.places.map((p) => `${KIND[p.kind] || p.kind}: ${p.label}${p.unconfirmed ? ' (name and size match, not compared)' : ''}`).join('; '),
+        cell: (g) => h('div', { class: 'places' }, g.places.map(placeRow)) },
+    ], r.groups, { name: `Find ${L.q.trim()}`, empty: 'No file matches that.' }),
+  ].filter(Boolean));
+}
+
+function lookupView() {
+  const L = state.lookup || (state.lookup = { q: '', res: null });
+  const input = h('input', { type: 'search', id: 'lookupq', value: L.q, 'aria-label': 'Find a file',
+    placeholder: 'File name, part of a path, a checksum, or a date like 2026-05-06',
+    oninput: (e) => { L.q = e.target.value; clearTimeout(L.t); L.t = setTimeout(runLookup, 300); },
+    onkeydown: (e) => { if (e.key === 'Enter') { clearTimeout(L.t); runLookup(); } } });
+  setTimeout(() => { input.focus(); drawLookup(); }, 0);
+  return [
+    h('h1', {}, 'Find a file'),
+    h('p', { class: 'lede' }, 'Searches files on your cards, the files in your library folders, and your Lightroom library. Each result shows every place that file is, matched by checksum, whatever it is called there.'),
+    h('div', { class: 'row lookupbar' }, input),
+    h('div', { id: 'lookupres' }),
   ];
 }
 
@@ -866,7 +922,7 @@ function welcomeView() {
 }
 
 function renderMain() {
-  const views = { card: cardView, files: filesView, map: mapView, index: indexView, lightroom: lightroomView, settings: settingsView, welcome: welcomeView };
+  const views = { lookup: lookupView, card: cardView, files: filesView, map: mapView, index: indexView, lightroom: lightroomView, settings: settingsView, welcome: welcomeView };
   document.getElementById('main').replaceChildren(...views[state.view]().flat(Infinity).filter(Boolean));
 }
 

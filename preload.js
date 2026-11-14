@@ -5,7 +5,7 @@ const INVOKE = new Set([
   'job:cancel', 'map', 'files', 'card:rename', 'thumb', 'open', 'lightroom:pending', 'lightroom:open',
   'library:folders', 'library:setFolders', 'index:status', 'index:inventory', 'index:start', 'index:stop',
   'index:scan', 'index:setDrives', 'index:exclude', 'index:include',
-  'index:rules', 'index:addPrefix', 'index:removePrefix', 'index:togglePrefix', 'lrcache:status', 'lrcache:albums', 'lrcache:refresh', 'settings:get', 'settings:set', 'pickFolder', 'reveal',
+  'index:rules', 'index:addPrefix', 'index:removePrefix', 'index:togglePrefix', 'lookup', 'export:csv', 'lrcache:status', 'lrcache:albums', 'lrcache:refresh', 'settings:get', 'settings:set', 'pickFolder', 'reveal',
 ]);
 const EVENTS = new Set(['cards', 'job', 'volumes', 'bg']);
 

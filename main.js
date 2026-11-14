@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const { DatabaseSync } = require('node:sqlite');
 const { openDb, getSettings, setSettings } = require('./core/db');
+const { lookup } = require('./core/lookup');
 
 let dbFile = null;
 
@@ -263,7 +264,7 @@ function registerIpc() {
     progress: bgProgress,
     // Every connected drive except camera cards; ticked ones are scanned.
     drives: volumesNow.filter((v) => !cardSerials().has(v.serial)).map((v) => ({ ...v, selected: scanSerials().includes(v.serial) })),
-    found: foundFolders(db).slice(0, 80).map((g) => ({ ...g, path: g.path || `${g.rel} (drive not connected)` })),
+    found: foundFolders(db).map((g) => ({ ...g, path: g.path || `${g.rel} (drive not connected)` })),
     excluded: excludedPins().map((p) => currentPath(p)),
   }));
   // What the scan looks for: built-in rules, your prefixes, and the names it actually found.
@@ -367,6 +368,25 @@ function registerIpc() {
 
   // Individual files. Each gets `openPath`: the best file to preview or open,
   // preferring a copy on disk over the (slower) card.
+  // Find a file anywhere: cards, your folders, Lightroom.
+  ipcMain.handle('lookup', (_e, q) => {
+    const mounted = Object.fromEntries(drives.map((d) => [d.serial, d.letter]));
+    return lookup(db, q, { mounted });
+  });
+
+  // Save a table as CSV. A UTF-8 marker at the start makes Excel read accents correctly.
+  ipcMain.handle('export:csv', async (_e, { name, csv }) => {
+    const safe = String(name || 'cardmap').replace(/[<>:"/\\|?*\x00-\x1f]/g, ' ').trim() || 'cardmap';
+    const stamp = new Date().toISOString().slice(0, 10);
+    const r = await dialog.showSaveDialog(win, {
+      defaultPath: path.join(app.getPath('documents'), `${safe} ${stamp}.csv`),
+      filters: [{ name: 'CSV', extensions: ['csv'] }],
+    });
+    if (r.canceled || !r.filePath) return null;
+    fs.writeFileSync(r.filePath, `﻿${csv}`, 'utf8');
+    return r.filePath;
+  });
+
   ipcMain.handle('files', (_e, q) => {
     const letters = new Map();
     for (const d of drives) {
