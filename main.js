@@ -662,6 +662,7 @@ function createWindow() {
     minWidth: 900,
     minHeight: 560,
     backgroundColor: '#14161a',
+    icon: path.join(__dirname, 'assets', 'cardmap.png'),
     autoHideMenuBar: true,
     title: 'CardMap',
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
