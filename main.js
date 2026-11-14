@@ -448,7 +448,9 @@ function registerIpc() {
     };
     (async () => {
       if (opts.hashOnly) return { hashOnly: true, ...(await hashPending(db, { shouldPause: () => Boolean(job) }, j, emit)) };
-      const { scan, methods } = await bringUpToDate(Boolean(opts.full) || reason === 'manual', j, emit);
+      // Every folder is listed in full each time CardMap opens (in the background) and when
+      // you start a scan; checks in between ask Windows Search what changed.
+      const { scan, methods } = await bringUpToDate(Boolean(opts.full) || reason === 'manual' || reason === 'opened', j, emit);
       if (j.cancelled) return { ...scan, scanOnly: true, cancelled: true };
       recordScan(db, historyVolumes(), reason, methods);
       if (!withChecksums) return { ...scan, scanOnly: true };

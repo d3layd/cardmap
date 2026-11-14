@@ -786,7 +786,7 @@ function indexView() {
         ? h('div', { class: 'hint' }, `Watching ${state.watching.watching.join(', ')} for new, changed, moved and deleted files while CardMap is open. Changes are picked up a few seconds after they stop.`)
         : null,
       state.watching && state.watching.useSearch
-        ? h('div', { class: 'hint' }, 'Automatic checks ask Windows Search what changed, which takes seconds. Each drive is still walked in full once a week, and whenever you press Scan or Start, to catch deletions and anything Windows missed.')
+        ? h('div', { class: 'hint' }, 'Each time CardMap opens, every drive is walked in full in the background, to catch deletions and anything Windows missed. The checks in between (when a drive is connected, and every 6 hours) ask Windows Search what changed, which takes seconds.')
         : null,
       h('div', { class: 'row actions' },
         ix.running
@@ -802,7 +802,7 @@ function indexView() {
     h('div', { class: 'row toolbar' }, h('strong', {}, 'Automatic')),
     h('div', { class: 'checks stack' },
       autoToggle('autoIndex', 'Keep the index up to date: scan for new folders and files, and read missing checksums, when CardMap opens, when one of these drives is connected, and every 6 hours.'),
-      autoToggle('useWindowsSearch', 'Use Windows Search for automatic checks: ask it what changed instead of listing every folder. Turn off if Windows Search is switched off or skips your drives.'),
+      autoToggle('useWindowsSearch', 'Use Windows Search for the checks between full walks: ask it what changed instead of listing every folder. Turn off if Windows Search is switched off or skips your drives.'),
       autoToggle('autoCardChecksums', 'Read checksums from a card in the background as soon as it is plugged in, so its files can be matched and looked up.')),
 
     h('div', { class: 'row toolbar' }, h('strong', {}, 'Drives to scan')),
