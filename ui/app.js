@@ -633,6 +633,16 @@ function settingsView() {
       h('div', { class: 'row actions' },
         h('button', { class: 'btn primary', onclick: async () => { state.settings = await api.invoke('settings:set', { lightroomOriginals: lr.value.trim() }); renderMain(); } }, 'Save'))
     ),
+    h('h2', { class: 'section' }, 'CardMap\'s data'),
+    h('div', { class: 'card-box' },
+      h('div', {}, 'Everything CardMap records (cards, copies, the library index, the Lightroom cache) is in one file:'),
+      h('div', { class: 'row tight dbpath' },
+        h('code', { class: 'big' }, st.dbFile || 'unknown'),
+        st.dbFile ? h('button', { class: 'link', onclick: () => api.invoke('reveal', st.dbFile.slice(0, st.dbFile.lastIndexOf('\\'))) }, 'Open folder') : null),
+      h('div', { class: 'hint' }, st.backupAt
+        ? `A complete copy is saved once a day as ${st.backupFile.slice(st.backupFile.lastIndexOf('\\') + 1)} in the same folder. Last saved ${dateTime(st.backupAt)}.`
+        : 'A complete copy is saved once a day in the same folder, starting 30 seconds after CardMap opens.'),
+      h('div', { class: 'hint' }, 'To copy the database yourself, close CardMap first.')),
   ];
 }
 

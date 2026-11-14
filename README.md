@@ -19,9 +19,15 @@ Windows only for now. Needs [Node.js](https://nodejs.org) 22 or newer.
 npm install
 ```
 
+Then double-click `CardMap.cmd`, or run:
+
 ```bash
 npm start
 ```
+
+## Where its data lives
+
+Everything CardMap records is in one SQLite file, `cardmap.db` in a `CardMap` folder in your home folder, with a daily copy saved next to it as `cardmap.backup.db`. It is kept outside AppData on purpose: Windows can redirect AppData to a private copy for programs started from inside a sandboxed app, which would leave you with two different databases depending on how CardMap was opened. Settings shows the exact path.
 
 ## Status
 

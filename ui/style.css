@@ -211,3 +211,7 @@ code.big { font-size: 13px; color: var(--text); }
 .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 4px; }
 .chip { padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); font-size: 12px; color: var(--muted); }
 .addprefix { margin-top: 8px; max-width: 360px; }
+
+/* Settings: data location */
+h2.section { font-size: 16px; font-weight: 600; margin: 26px 0 10px; }
+.dbpath { margin: 8px 0 4px; flex-wrap: wrap; }

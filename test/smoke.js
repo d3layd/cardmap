@@ -123,7 +123,7 @@ const { inventory, hashPending, matchCards, indexStatus } = require('../core/lib
     assert.strictEqual(m1.read, 0);
     assert(m1.lookups >= 3 && m1.filesWithCopies >= 3);
     // A changed file loses its checksum and is read again; a deleted one leaves the index.
-    const victim2 = fs.readdirSync(path.join(lib, fs.readdirSync(lib)[0])).map((n) => path.join(lib, fs.readdirSync(lib)[0], n)).find((p) => p.endsWith('.JPG'));
+    const victim2 = fs.readdirSync(path.join(lib, fs.readdirSync(lib)[0])).map((n) => path.join(lib, fs.readdirSync(lib)[0], n))[0]; // any indexed file will do
     fs.appendFileSync(victim2, 'x');
     const inv2 = await inventory(db, [lib], job, () => {});
     assert.strictEqual(inv2.changed, 1);

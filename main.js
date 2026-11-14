@@ -4,7 +4,54 @@ const { isMedia, pickFiles } = require('./core/util');
 const { findCatalogs, refreshIndex, cacheStatus, albumsOverview } = require('./core/lrcatalog');
 const path = require('node:path');
 const fs = require('node:fs');
+const os = require('node:os');
+const { DatabaseSync } = require('node:sqlite');
 const { openDb, getSettings, setSettings } = require('./core/db');
+
+let dbFile = null;
+
+/**
+ * Where the database lives: a plain folder in the user's home, not AppData.
+ *
+ * Windows redirects AppData for programs started from inside a sandboxed (MSIX-packaged)
+ * app, to a private copy belonging to that app. CardMap kept in AppData could then open
+ * two different databases depending on how it was started. A folder outside AppData is
+ * never redirected, so every launch sees the same one.
+ *
+ * The first time, an existing AppData database is copied across.
+ */
+function defaultDbPath() {
+  const file = path.join(os.homedir(), 'CardMap', 'cardmap.db');
+  if (fs.existsSync(file)) return file;
+  const old = path.join(app.getPath('userData'), 'cardmap.db');
+  if (fs.existsSync(old)) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const src = new DatabaseSync(old);
+    try {
+      // A consistent single-file copy, including anything still in the -wal file.
+      src.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
+    } finally {
+      src.close();
+    }
+  }
+  return file;
+}
+
+const backupFile = () => dbFile.replace(/\.db$/i, '') + '.backup.db';
+
+/** Once a day, save a complete copy of the database next to it (cardmap.backup.db). */
+function dailyBackup() {
+  try {
+    const bak = backupFile();
+    if (fs.existsSync(bak) && Date.now() - fs.statSync(bak).mtimeMs < 24 * 3600 * 1000) return;
+    const tmp = `${bak}.tmp`;
+    fs.rmSync(tmp, { force: true });
+    db.exec(`VACUUM INTO '${tmp.replace(/'/g, "''")}'`);
+    fs.renameSync(tmp, bak); // replaces yesterday's copy only once today's is complete
+  } catch (e) {
+    console.error('CardMap backup failed:', e.message);
+  }
+}
 const { listDrives } = require('./core/drives');
 const { setVolumes, syncDb, pin, currentPath, online, pathExists } = require('./core/volumes');
 const { scanCard, cardSummary } = require('./core/cards');
@@ -402,6 +449,9 @@ function registerIpc() {
       backup: currentPath(readPin(s.backupPin)) || s.backup || '',
       lightroomDetected: lightroomRoots(),
       lightroomCatalogs: findCatalogs(''),
+      dbFile,
+      backupFile: dbFile ? backupFile() : null,
+      backupAt: dbFile && fs.existsSync(backupFile()) ? fs.statSync(backupFile()).mtimeMs : null,
     };
   };
   ipcMain.handle('settings:get', settingsOut);
@@ -465,9 +515,10 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-  const dbFile = process.env.CARDMAP_DB || path.join(app.getPath('userData'), 'cardmap.db');
+  dbFile = process.env.CARDMAP_DB || defaultDbPath();
   fs.mkdirSync(path.dirname(dbFile), { recursive: true });
   db = openDb(dbFile);
+  if (!process.env.CARDMAP_SHOT) setTimeout(dailyBackup, 30000);
   registerIpc();
   createWindow();
   refreshDrives();

@@ -11,7 +11,7 @@ const path = require('node:path');
 const { addLocation, tx } = require('./db');
 const { walkMedia, hashFile, quickHash, throttle } = require('./util');
 const { pin, currentPath, online } = require('./volumes');
-const { walkCamera, learnPrefixes, prefixOf } = require('./discover');
+const { walkCamera, learnPrefixes, prefixOf, classify } = require('./discover');
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS lib_files (
@@ -67,12 +67,39 @@ function recorder(db, stamp, src, res) {
   };
 }
 
-function dropUnseen(db, folder, stamp, src) {
+/**
+ * After a listing, forget files under `folder` that the listing did not see, but only
+ * when they are really gone (or, with `keep`, no longer count as imported media).
+ *
+ * Not seeing a file is not proof it was deleted: a folder that could not be listed this
+ * time (a drive slow to wake, a brief disconnect, a permissions error) must not throw
+ * away checksums that took hours to compute.
+ */
+function dropUnseen(db, folder, stamp, src, keep) {
   const k = keyOf(folder);
   const prefix = k.rel.endsWith('\\') ? k.rel : `${k.rel}\\`;
-  return Number(
-    db.prepare('DELETE FROM lib_files WHERE vol = ? AND substr(rel, 1, ?) = ? AND src = ? AND seen != ?').run(k.vol, prefix.length, prefix, src, stamp).changes
-  );
+  const rows = db
+    .prepare('SELECT id, vol, rel, size FROM lib_files WHERE vol = ? AND substr(rel, 1, ?) = ? AND src = ? AND seen != ?')
+    .all(k.vol, prefix.length, prefix, src, stamp);
+  const del = db.prepare('DELETE FROM lib_files WHERE id = ?');
+  let n = 0;
+  tx(db, () => {
+    for (const r of rows) {
+      const p = pathOf(r);
+      if (!p || !fs.existsSync(path.parse(p).root)) continue; // its drive is not here: keep
+      let gone = false;
+      try {
+        gone = !fs.existsSync(p);
+      } catch {
+        gone = false;
+      }
+      if (gone || (keep && !keep(p, r.size))) {
+        del.run(r.id);
+        n += 1;
+      }
+    }
+  });
+  return n;
 }
 
 /**
@@ -118,7 +145,11 @@ async function discover(db, roots, opts, job, emit) {
       res.cancelled = true;
       break;
     }
-    res.removed += dropUnseen(db, root, stamp, 'scan');
+    // Files still there that the rules no longer count as imported media (a prefix you
+    // ignored, a folder you excluded) leave too; files that merely went unseen stay.
+    const excludedNow = ((opts && opts.excluded) || []).map((p) => `${p.toLowerCase().replace(/[\\/]+$/, '')}\\`);
+    const keep = (p, size) => Boolean(classify(p, size, prefixes)) && !excludedNow.some((x) => p.toLowerCase().startsWith(x));
+    res.removed += dropUnseen(db, root, stamp, 'scan', keep);
   }
   // Anything previously found inside a folder that is now excluded leaves the index.
   for (const ex of (opts && opts.excluded) || []) {
