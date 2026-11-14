@@ -64,7 +64,7 @@ function reconcileView() {
   if (sel.onlyHereFiles) {
     out.push(h('div', { class: 'row actions' },
       h('button', { class: 'btn primary', 'aria-expanded': String(Boolean(state.copyPlanOpen)), onclick: () => { state.copyPlanOpen = !state.copyPlanOpen; renderMain(); } },
-        `Make second copies of the ${sel.onlyHereFiles.toLocaleString()} files only here`)));
+        'Make second copies of the files only here')));
   }
   const name = `${sel.letter || 'Drive'}${sel.label ? ` ${sel.label}` : ''}`;
   const showFolder = (folder) => {

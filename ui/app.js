@@ -390,9 +390,9 @@ function importPanel(s, rows, keys, unit) {
           } }, 'Browse'),
           h('button', { class: 'btn', 'aria-label': `Remove extra copy ${i + 1}`, onclick: () => { state.form.extra.splice(i, 1); renderMain(); } }, 'Remove')));
     }),
-    h('div', { class: 'row tight' },
+    h('div', { class: 'field' },
       h('button', { class: 'btn', onclick: () => { state.form.extra.push(''); renderMain(); } }, 'Add another destination'),
-      h('span', { class: 'none' }, 'Type a path that does not exist yet to make a new folder, or use New folder in Browse.')),
+      h('div', { class: 'none' }, 'Type a path that does not exist yet to make a new folder, or use New folder in Browse.')),
     h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: state.form.thenLightroom,
       onchange: (e) => { state.form.thenLightroom = e.target.checked; } }),
       ' Then open Add to Lightroom for these files'),
