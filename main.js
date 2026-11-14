@@ -1,6 +1,6 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, nativeImage } = require('electron');
 const { execFile, spawn } = require('node:child_process');
-const { isMedia, pickFiles } = require('./core/util');
+const { isMedia, pickFiles, MEDIA_EXT } = require('./core/util');
 const { findCatalogs, refreshIndex, cacheStatus, albumsOverview } = require('./core/lrcatalog');
 const path = require('node:path');
 const fs = require('node:fs');
@@ -11,6 +11,7 @@ const { lookup } = require('./core/lookup');
 const { fileMap } = require('./core/filemap');
 const { recordScan, recordChanges, history, drivesOverTime } = require('./core/history');
 const { createWatcher } = require('./core/watch');
+const winsearch = require('./core/winsearch');
 const { editsStatus, exportEdits, pairExport } = require('./core/lredits');
 
 let dbFile = null;
@@ -64,7 +65,7 @@ const { scanCard, cardSummary } = require('./core/cards');
 const { runImport } = require('./core/importer');
 const { findOriginalsRoots, runLightroomCheck } = require('./core/lightroom');
 const { runFolderScan, inventory, hashPending, hashCard, applyChanges, indexStatus, discover, foundFolders, foundPrefixes, dropScanned, dropWholeDrive } = require('./core/libindex');
-const { describeRules, prefixList, cleanPrefix, learnPrefixes, classify } = require('./core/discover');
+const { describeRules, prefixList, cleanPrefix, learnPrefixes, classify, RAW, STILL, VIDEO } = require('./core/discover');
 const { overview, listFiles } = require('./core/library');
 
 let win = null;
@@ -353,7 +354,87 @@ function registerIpc() {
     const vols = new Set([...scanSerials(), ...folderVols()]);
     return volumesLatest.filter((v) => vols.has(v.serial) && !cardSerials().has(v.serial));
   };
-  // opts: { reason: why it runs (for the drive history), hashOnly: skip the scan, just read checksums }
+  // Which rule applies to a changed file: in one of your folders, everything counts;
+  // on a scanned drive, only imported camera media outside excluded folders.
+  const makeRuleFor = () => {
+    const prefixes = learnPrefixes(db);
+    const dirKey = (f) => `${String(f).toLowerCase().replace(/[\\/]+$/, '')}\\`;
+    const folders = onlineFolders().map(dirKey);
+    const excluded = excludedPins().map((p) => dirKey(currentPath(p)));
+    const scanned = new Set(scanRoots().map((r) => r.slice(0, 2).toLowerCase()));
+    return (p) => {
+      const lower = p.toLowerCase();
+      if (folders.some((f) => lower.startsWith(f))) return { src: 'folder', keep: (q) => isMedia(path.basename(q)) || null };
+      if (scanned.has(lower.slice(0, 2)) && !excluded.some((x) => lower.startsWith(x))) return { src: 'scan', keep: (q, size) => classify(q, size, prefixes) };
+      return null;
+    };
+  };
+
+  // When each drive or folder was last walked in full, and last checked at all.
+  const WEEK = 7 * 24 * 60 * 60 * 1000;
+  const timeKey = (root) => {
+    const k = pin(root);
+    return k.vol ? `${k.vol}|${k.rel.toLowerCase()}` : root.toLowerCase();
+  };
+  const readTimes = () => {
+    try {
+      return JSON.parse(getSettings(db).scanTimes || '{}');
+    } catch {
+      return {};
+    }
+  };
+  const lastWalks = () => {
+    const times = readTimes();
+    return scanRoots().map((root) => ({ root, ...(times[timeKey(root)] || {}) }));
+  };
+  /**
+   * Bring the drives and folders up to date. Each is either walked in full, or (when it
+   * was walked in the last week and Windows Search covers it) Windows Search is asked
+   * what changed since it was last checked. Returns { scan, methods: { [vol]: 'walk' | 'search' } }.
+   */
+  const bringUpToDate = async (force, j, emit) => {
+    const times = readTimes();
+    const items = [...scanRoots().map((root) => ({ root, src: 'scan' })), ...onlineFolders().map((root) => ({ root, src: 'folder' }))];
+    const useSearch = !force && autoOn('useWindowsSearch');
+    const methods = {};
+    const now = new Date().toISOString();
+    const walkDrives = [];
+    const walkFolders = [];
+    const quick = { added: 0, changed: 0, removed: 0 };
+    const ruleFor = makeRuleFor();
+    for (const it of items) {
+      if (j.cancelled) break;
+      const t = times[timeKey(it.root)] || {};
+      const recent = t.full && Date.now() - Date.parse(t.full) < WEEK;
+      let paths = null;
+      if (useSearch && recent && (await winsearch.covers(it.root))) {
+        emit({ label: `Asking Windows Search what changed in ${it.root}` });
+        // A margin of a day: Windows Search can take a while to catch up.
+        const since = new Date(Date.parse(t.checked || t.full) - 24 * 60 * 60 * 1000);
+        paths = await winsearch.changedSince(it.root, since, it.src === 'scan' ? new Set([...RAW, ...STILL, ...VIDEO]) : MEDIA_EXT);
+      }
+      const vol = pin(it.root).vol;
+      if (paths) {
+        const r = await applyChanges(db, { files: paths }, ruleFor);
+        quick.added += r.added;
+        quick.changed += r.changed;
+        quick.removed += r.removed;
+        times[timeKey(it.root)] = { ...t, checked: now, method: 'search' };
+        if (vol && methods[vol] !== 'walk') methods[vol] = 'search';
+      } else {
+        (it.src === 'scan' ? walkDrives : walkFolders).push(it.root);
+        times[timeKey(it.root)] = { full: now, checked: now, method: 'walk' };
+        if (vol) methods[vol] = 'walk';
+      }
+    }
+    const scan = await discover(db, walkDrives, { excluded: excludedPins().map((p) => currentPath(p)) }, j, emit);
+    if (!j.cancelled) await inventory(db, walkFolders, j, emit);
+    if (!j.cancelled) setSettings(db, { scanTimes: JSON.stringify(times) });
+    return { scan: { ...scan, quick, walked: walkDrives.length + walkFolders.length, searched: items.length - walkDrives.length - walkFolders.length }, methods };
+  };
+
+  // opts: { reason: why it runs (for the drive history), hashOnly: skip the scan, just read checksums,
+  //         full: walk everything in full instead of asking Windows Search (scans you start do) }
   startIndexing = (withChecksums = true, opts = {}) => {
     if (bg) return;
     const reason = opts.reason || 'manual';
@@ -367,10 +448,9 @@ function registerIpc() {
     };
     (async () => {
       if (opts.hashOnly) return { hashOnly: true, ...(await hashPending(db, { shouldPause: () => Boolean(job) }, j, emit)) };
-      const scan = await discover(db, scanRoots(), { excluded: excludedPins().map((p) => currentPath(p)) }, j, emit);
+      const { scan, methods } = await bringUpToDate(Boolean(opts.full) || reason === 'manual', j, emit);
       if (j.cancelled) return { ...scan, scanOnly: true, cancelled: true };
-      await inventory(db, onlineFolders(), j, emit);
-      if (!j.cancelled) recordScan(db, historyVolumes(), reason);
+      recordScan(db, historyVolumes(), reason, methods);
       if (!withChecksums) return { ...scan, scanOnly: true };
       return { scan, ...(await hashPending(db, { shouldPause: () => Boolean(job) }, j, emit)) };
     })()
@@ -411,17 +491,7 @@ function registerIpc() {
 
   // ----- Watching the indexed drives and folders for changes -----
   const watcher = createWatcher(async (batch) => {
-    const prefixes = learnPrefixes(db);
-    const dirKey = (f) => `${String(f).toLowerCase().replace(/[\\/]+$/, '')}\\`;
-    const folders = onlineFolders().map(dirKey);
-    const excluded = excludedPins().map((p) => dirKey(currentPath(p)));
-    const scanned = new Set(scanRoots().map((r) => r.slice(0, 2).toLowerCase()));
-    const ruleFor = (p) => {
-      const lower = p.toLowerCase();
-      if (folders.some((f) => lower.startsWith(f))) return { src: 'folder', keep: (q) => isMedia(path.basename(q)) || null };
-      if (scanned.has(lower.slice(0, 2)) && !excluded.some((x) => lower.startsWith(x))) return { src: 'scan', keep: (q, size) => classify(q, size, prefixes) };
-      return null;
-    };
+    const ruleFor = makeRuleFor();
     try {
       const r = await applyChanges(db, batch, ruleFor);
       recordChanges(db, r.byVol, volumesLatest);
@@ -435,7 +505,7 @@ function registerIpc() {
     if (process.env.CARDMAP_SHOT || !autoOn('autoIndex')) return watcher.close();
     watcher.set([...scanRoots(), ...onlineFolders()]);
   };
-  ipcMain.handle('index:watching', () => watcher.watching());
+  ipcMain.handle('index:watching', () => ({ watching: watcher.watching(), walks: lastWalks(), useSearch: autoOn('useWindowsSearch') }));
   ipcMain.handle('history', () => ({ rows: history(db), drives: drivesOverTime(db) }));
   // Drives CardMap has already asked about (or that were here before this feature).
   const knownDrives = () => {

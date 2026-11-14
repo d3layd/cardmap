@@ -782,8 +782,11 @@ function indexView() {
       ix.files ? h('div', { class: 'usage wide' }, h('progress', { max: ix.bytes || 1, value: ix.hashedBytes, 'aria-label': `${pct}% indexed` })) : null,
       ix.duplicateGroups ? h('div', { class: 'hint' }, `Among indexed files, ${ix.duplicateGroups.toLocaleString()} exist in more than one place. The extra copies take ${bytes(ix.duplicateBytes)}.`) : null,
       h('div', { class: 'hint', id: 'bgline' }, ix.running ? bgLine(state.bg || ix.progress) : ''),
-      state.watching && state.watching.length
-        ? h('div', { class: 'hint' }, `Watching ${state.watching.join(', ')} for new, changed, moved and deleted files. Changes are picked up a few seconds after they stop.`)
+      state.watching && state.watching.watching.length
+        ? h('div', { class: 'hint' }, `Watching ${state.watching.watching.join(', ')} for new, changed, moved and deleted files while CardMap is open. Changes are picked up a few seconds after they stop.`)
+        : null,
+      state.watching && state.watching.useSearch
+        ? h('div', { class: 'hint' }, 'Automatic checks ask Windows Search what changed, which takes seconds. Each drive is still walked in full once a week, and whenever you press Scan or Start, to catch deletions and anything Windows missed.')
         : null,
       h('div', { class: 'row actions' },
         ix.running
@@ -799,6 +802,7 @@ function indexView() {
     h('div', { class: 'row toolbar' }, h('strong', {}, 'Automatic')),
     h('div', { class: 'checks stack' },
       autoToggle('autoIndex', 'Keep the index up to date: scan for new folders and files, and read missing checksums, when CardMap opens, when one of these drives is connected, and every 6 hours.'),
+      autoToggle('useWindowsSearch', 'Use Windows Search for automatic checks: ask it what changed instead of listing every folder. Turn off if Windows Search is switched off or skips your drives.'),
       autoToggle('autoCardChecksums', 'Read checksums from a card in the background as soon as it is plugged in, so its files can be matched and looked up.')),
 
     h('div', { class: 'row toolbar' }, h('strong', {}, 'Drives to scan')),
@@ -871,7 +875,8 @@ function historySection() {
           { label: 'Their size', num: true, value: (d) => d.bytes, cell: (d) => bytes(d.bytes || 0) },
           { label: 'With checksum', num: true, value: (d) => (d.files ? d.hashed / d.files : 0), text: (d) => d.hashed, cell: (d) => (d.files ? `${Math.floor((d.hashed / d.files) * 100)}%` : '') },
           { label: 'Free then', num: true, value: (d) => d.free || 0, cell: (d) => (d.size ? `${bytes(d.free || 0)} of ${bytes(d.size)}` : '') },
-          { label: 'Last scanned', cls: 'date', value: (d) => d.lastScan || '', cell: (d) => HIST_WHEN(d.lastScan) },
+          { label: 'Last checked', cls: 'date', value: (d) => d.lastScan || '', cell: (d) => HIST_WHEN(d.lastScan) },
+          { label: 'Last full walk', cls: 'date', value: (d) => d.lastWalk || '', cell: (d) => HIST_WHEN(d.lastWalk) },
           { label: 'Last record', cls: 'date', value: (d) => d.lastAt || '', cell: (d) => HIST_WHEN(d.lastAt) },
           { label: 'First record', cls: 'date', value: (d) => d.firstAt || '', cell: (d) => HIST_WHEN(d.firstAt) },
         ], H.drives, { name: 'CardMap drives', sort: { col: 0, dir: 1 } })
