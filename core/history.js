@@ -58,7 +58,7 @@ function recordScan(db, volumes, reason) {
     const prev = last.get(v.serial);
     // added_at is stored by SQLite as "YYYY-MM-DD HH:MM:SS" (UTC).
     const since = prev ? prev.at.replace('T', ' ').slice(0, 19) : '';
-    const added = prev ? addedSince.get(v.serial, since).n : t.files;
+    const added = prev ? addedSince.get(v.serial, since).n : 0; // nothing to compare the first record with
     const removed = prev ? Math.max(0, prev.files + added - t.files) : 0;
     ins.run(now.toISOString(), localDay(now), v.serial, v.letter, v.label || '', reason, t.files, t.bytes, t.hashed, added, removed, v.size || null, v.free || null);
   }
@@ -87,7 +87,13 @@ function recordChanges(db, byVol, volumes) {
 /** Newest first. */
 function history(db, limit = 500) {
   ensure(db);
-  return db.prepare('SELECT * FROM drive_history ORDER BY at DESC LIMIT ?').all(limit).map((r) => ({ ...r, what: REASONS[r.reason] || r.reason }));
+  const first = new Set(db.prepare('SELECT min(id) AS id FROM drive_history GROUP BY vol').all().map((r) => r.id));
+  return db
+    .prepare('SELECT * FROM drive_history ORDER BY at DESC LIMIT ?')
+    .all(limit)
+    .map((r) => (first.has(r.id) && r.reason !== 'changes'
+      ? { ...r, added: 0, removed: 0, what: `First record: ${REASONS[r.reason] || r.reason}` }
+      : { ...r, what: REASONS[r.reason] || r.reason }));
 }
 
 /** Every drive CardMap has recorded, with its first and latest record. */
