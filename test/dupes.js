@@ -50,4 +50,20 @@ d = decide([c('J:\\a.nef', 'J', 'disk1'), c('E:\\a.nef', 'E', 'disk2', { ok: fal
 assert.strictEqual(d.status, 'unchecked');
 assert.deepStrictEqual(d.remove, []);
 
+// Three places needed: three disks hold the file, so nothing can go...
+const three = [c('Z:\a.nef', 'Z', 'disk3'), c('J:\a.nef', 'J', 'disk1'), c('E:\a.nef', 'E', 'disk2')];
+d = decide(three, opts({ minPlaces: 3 }));
+assert.strictEqual(d.status, 'needed');
+// ...but with Lightroom counted as the third, the third disk's copy can go.
+d = decide(three, opts({ minPlaces: 3, inLightroom: true }));
+assert.deepStrictEqual(paths(d.remove), ['Z:\a.nef']);
+
+// One place needed and Lightroom counted: one copy on your own drives is still kept.
+d = decide([c('J:\a.nef', 'J', 'disk1'), c('E:\a.nef', 'E', 'disk2')], opts({ minPlaces: 1, inLightroom: true }));
+assert.strictEqual(d.keep.length, 1);
+assert.deepStrictEqual(paths(d.remove), ['E:\a.nef']);
+// One place needed, no Lightroom: the best drive keeps its copy, the other can go.
+d = decide([c('J:\a.nef', 'J', 'disk1'), c('E:\a.nef', 'E', 'disk2')], opts({ minPlaces: 1, countLightroom: false }));
+assert.deepStrictEqual(paths(d.keep), ['J:\a.nef']);
+
 console.log('safe-to-delete rule: all cases OK');

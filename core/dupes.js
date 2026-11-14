@@ -3,9 +3,10 @@
 // CardMap never deletes anything. It only makes a list.
 //
 // A copy is listed as safe to delete only when all of these hold:
-//  - the file, matched by checksum, will still be in at least two places afterwards,
-//    on different physical disks (two partitions, or a virtual disk and the disk its file
-//    sits on, count as one). Lightroom's cloud copy can count as one place (a setting);
+//  - the file, matched by checksum, will still be in enough places afterwards (two by
+//    default, a setting), on different physical disks (two partitions, or a virtual disk
+//    and the disk its file sits on, count as one). Lightroom's cloud copy can count as
+//    one place (a setting). At least one copy on your own drives is always kept;
 //  - every copy involved is on a connected drive and still has the size and date it had
 //    when its checksum was read (anything changed since is left alone);
 //  - the copy is not in a folder, or under a folder, that holds a Premiere, After Effects
@@ -47,7 +48,8 @@ function decide(copies, opts) {
   const keep = [];
   const disks = new Set();
   for (const c of order) {
-    if (disks.size + lrPlace >= minPlaces) break;
+    // Always keep one copy on your own drives, even when Lightroom alone would do.
+    if (keep.length && disks.size + lrPlace >= minPlaces) break;
     if (disks.has(c.phys)) continue;
     keep.push(c);
     disks.add(c.phys);
@@ -103,7 +105,7 @@ function topFolder(p) {
 
 /**
  * Build the report. phys: { 'E:': { id, virtualOf } } from physicalDrives().
- * settings: { priority: { [volSerial]: rank }, countLightroom }
+ * settings: { priority: { [volSerial]: rank }, countLightroom, minPlaces }
  */
 async function buildReport(db, phys, settings, job, emit) {
   const progress = throttle(emit || (() => {}), 200);
@@ -157,7 +159,7 @@ async function buildReport(db, phys, settings, job, emit) {
     for (const c of copies) if (c.ok) c.project = isNearProject(c.path);
     for (const c of copies) c.protected = Boolean(c.project);
     const lr = inLr(g.sha256);
-    const d = decide(copies, { priority: settings.priority || {}, countLightroom: settings.countLightroom, inLightroom: lr });
+    const d = decide(copies, { priority: settings.priority || {}, countLightroom: settings.countLightroom, minPlaces: settings.minPlaces, inLightroom: lr });
     totals.extraBytes += g.size * (g.n - 1);
     if (d.status === 'safe') {
       totals.safeFiles += d.remove.length;

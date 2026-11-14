@@ -48,7 +48,10 @@ async function scanCard(db, drive, job, emit) {
  * Per-date status for a card. If presentIds is given, only those files (what is
  * on the card now) are counted; otherwise everything ever seen on that card.
  */
-function cardSummary(db, cardId, presentIds) {
+function cardSummary(db, cardId, presentIds, rules = {}) {
+  // How many verified copies make a file safe, and whether Lightroom counts as one.
+  const need = rules.copies || 2;
+  const countLr = rules.countLightroom !== false;
   const card = db.prepare('SELECT * FROM cards WHERE id = ?').get(cardId);
   if (!card) return null;
   let files = db.prepare('SELECT id, rel_path, size, capture_date, shoot, mark FROM files WHERE card_id = ?').all(cardId);
@@ -82,7 +85,7 @@ function cardSummary(db, cardId, presentIds) {
     const ls = byFile.get(f.id) || [];
     const copied = ls.some((l) => l.kind !== 'lightroom');
     const lr = ls.some((l) => l.kind === 'lightroom');
-    const safe = ls.length >= 2;
+    const safe = ls.filter((l) => l.kind !== 'lightroom').length + (countLr && lr ? 1 : 0) >= need;
     for (const t of [g, d, totals]) {
       t.count += 1;
       t.bytes += f.size;
@@ -113,7 +116,8 @@ function cardSummary(db, cardId, presentIds) {
     card,
     totals,
     safeToFormat: totals.count > 0 && totals.safe === totals.count,
-    // Every file not marked skip has 2+ verified copies; the skipped ones would be lost.
+    rules: { copies: need, countLightroom: countLr },
+    // Every file not marked skip has enough verified copies; the skipped ones would be lost.
     safeExceptSkipped: totals.count > 0 && totals.skip > totals.skipSafe && totals.safe - totals.skipSafe === totals.count - totals.skip,
     groups: out(byDate, true),
     folders: out(byFolder, false),

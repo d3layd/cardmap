@@ -553,9 +553,9 @@ function cardView() {
     : s.safeToFormat
       ? h('span', { class: 'badge good' }, 'Safe to format')
       : s.safeExceptSkipped
-        ? h('span', { class: 'badge warn', title: 'Every file you did not mark skip has 2 or more verified copies. Formatting loses the skipped ones.' },
+        ? h('span', { class: 'badge warn', title: `Every file you did not mark skip has ${s.rules.copies} or more verified copies. Formatting loses the skipped ones.` },
             `Safe to format, apart from ${t.skip - t.skipSafe} file${t.skip - t.skipSafe === 1 ? '' : 's'} marked skip`)
-        : h('span', { class: 'badge warn' }, `Not safe to format: ${t.count - t.safe} files have fewer than 2 verified copies`);
+        : h('span', { class: 'badge warn', title: rulesTitle(s.rules) }, `Not safe to format: ${t.count - t.safe} files have fewer than ${s.rules.copies} verified ${s.rules.copies === 1 ? 'copy' : 'copies'}`);
 
   const setGroup = (g) => { state.groupBy = g; defaultSelection(); renderMain(); };
 
@@ -609,7 +609,7 @@ function cardView() {
         g.lightroom < g.count ? h('div', {}, h('button', { class: 'link', title: 'See the files Lightroom does not have', onclick: () =>
           openFiles({ cardId: s.card.id, ...(byDate ? { date: g.key } : { folder: g.key }), lr: 'missing' }, `${g.key}: not in Lightroom`, `${title}. Files Lightroom has no record of, as of the last Lightroom check.`) },
           `see ${g.count - g.lightroom}`)) : null] },
-      { label: '2+ verified copies', num: true, value: (g) => g.safe, text: (g) => `${g.safe} of ${g.count}`, cell: (g) => tally(g.safe, g.count) },
+      { label: `${s.rules.copies}+ verified ${s.rules.copies === 1 ? 'copy' : 'copies'}`, num: true, value: (g) => g.safe, text: (g) => `${g.safe} of ${g.count}`, cell: (g) => tally(g.safe, g.count) },
       { label: 'Marked', value: (g) => g.ready * 1e6 + g.skip, text: (g) => markText(g), cell: (g) => (g.ready || g.skip ? markText(g) : h('span', { class: 'none' }, '')) },
     ], rows, { name: `${cardName(s.card)} by ${unit}` }),
   ]), s.mounted && state.drawer === 'import' ? importPanel(s, rows, keys, unit)
@@ -617,6 +617,8 @@ function cardView() {
     : state.drawer === 'lightroom' ? lightroomPanel(s, rows, keys, unit)
     : state.drawer === 'local' ? localPanel(s) : null)];
 }
+
+const rulesTitle = (r) => `A file is safe with ${r.copies} verified ${r.copies === 1 ? 'copy' : 'copies'}${r.countLightroom ? ', Lightroom counting as one' : ', not counting Lightroom'}. Change this in Settings.`;
 
 // Files only on the card (not copied anywhere, not in Lightroom) that have not been marked
 // Ready or Skip yet: ask for them to be reviewed.
@@ -764,8 +766,29 @@ function mapView() {
   ];
 }
 
+// The rule for what is safe: copies needed, and whether Lightroom counts as one.
+// rules: { copies, countLightroom }. save(change) stores it and refreshes.
+const placesText = (n) => (n === 1 ? 'one place' : `${['', 'one', 'two', 'three', 'four', 'five'][n] || n} places`);
+function safeRulesControls(rules, save, disabled) {
+  return [
+    h('div', { class: 'row tight' },
+      h('label', { for: 'safecopies' }, 'Copies a file needs before it counts as safe'),
+      h('select', { id: 'safecopies', disabled, onchange: (e) => save({ copies: Number(e.target.value) }) },
+        [1, 2, 3, 4, 5].map((n) => h('option', { value: n, selected: n === rules.copies }, String(n))))),
+    h('label', { class: 'check' },
+      h('input', { type: 'checkbox', checked: rules.countLightroom, disabled, onchange: (e) => save({ countLightroom: e.target.checked }) }),
+      'Count Lightroom\'s cloud copy as one of them'),
+    rules.copies === 1
+      ? h('div', { class: 'hint' }, h('strong', { class: 'part' }, 'With 1, a file in a single place counts as safe: there is no backup if that drive fails.'))
+      : null,
+    h('div', { class: 'hint' }, `Used for "Safe to format" on cards (each file needs ${placesText(rules.copies)}) and "Safe to delete" on the Duplicates page (on different physical disks). The delete list always keeps at least one copy on your own drives.`),
+  ];
+}
+
 function settingsView() {
   const st = state.settings;
+  if (!state.safeRules) api.invoke('dupes:settings', {}).then((r) => { state.safeRules = r; if (state.view === 'settings') renderMain(); });
+  const saveRules = async (change) => { state.safeRules = await api.invoke('dupes:settings', change); await refreshSummary(); renderMain(); };
   const lr = h('input', { type: 'text', value: st.lightroomOriginals || '', placeholder: 'Leave empty to detect automatically' });
   return [
     h('h1', {}, 'Settings'),
@@ -781,6 +804,8 @@ function settingsView() {
       h('div', { class: 'row actions' },
         h('button', { class: 'btn primary', onclick: async () => { state.settings = await api.invoke('settings:set', { lightroomOriginals: lr.value.trim() }); renderMain(); } }, 'Save'))
     ),
+    h('h2', { class: 'section' }, 'What counts as safe'),
+    h('div', { class: 'card-box' }, state.safeRules ? safeRulesControls(state.safeRules, saveRules) : 'Loading'),
     h('h2', { class: 'section' }, 'CardMap\'s data'),
     h('div', { class: 'card-box' },
       h('div', {}, 'Everything CardMap records (cards, copies, the library index, the Lightroom cache) is in one file:'),

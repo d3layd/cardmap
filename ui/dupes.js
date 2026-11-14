@@ -88,7 +88,7 @@ function dupesView() {
   const summary = h('div', { class: 'card-box' },
     h('div', {}, h('strong', {}, `${T.groups.toLocaleString()} files have more than one copy`), `, using ${bytes(T.extraBytes)} of extra space.`),
     h('ul', { class: 'tally' },
-      h('li', {}, h('strong', { class: 'ok' }, `Safe to delete: ${T.safeFiles.toLocaleString()} copies, ${bytes(T.safeBytes)}. `), 'Each file stays in at least two places.'),
+      h('li', {}, h('strong', { class: 'ok' }, `Safe to delete: ${T.safeFiles.toLocaleString()} copies, ${bytes(T.safeBytes)}. `), `Each file stays in at least ${placesText(st.copies)}.`),
       h('li', {}, h('strong', {}, `Extra copies on one disk: ${T.oneDiskFiles.toLocaleString()} copies, ${bytes(T.oneDiskBytes)}. `),
         'These files are only on one disk. Deleting the extras keeps one copy there: no worse than today if that disk fails, but there is still no backup.'),
       h('li', {}, h('strong', {}, `Backups to keep: ${T.neededGroups.toLocaleString()} files, ${bytes(T.neededBytes)}. `),
@@ -110,18 +110,17 @@ function dupesView() {
     h('summary', {}, 'How copies are chosen', h('span', { class: 'none' }, ` keep order ${st.order.map((o) => o.letter).join(' > ')}${st.countLightroom ? ', Lightroom counts' : ''}`)),
     h('h3', {}, 'A copy is safe to delete only if'),
     h('ul', { class: 'steps' },
-      h('li', {}, 'the file, matched by checksum, stays in at least two places on different physical disks;'),
+      h('li', {}, `the file, matched by checksum, stays in at least ${placesText(st.copies)} on different physical disks${st.countLightroom ? ' (Lightroom\'s cloud copy can be one)' : ''}, with at least one copy on your own drives;`),
       h('li', {}, 'every copy is on a connected drive and has not changed since its checksum was read;'),
       h('li', {}, 'it is not inside a folder (or under a folder) holding a Premiere, After Effects, DaVinci or Vegas project, since deleting it could break that project.')),
     virtuals.length ? h('p', { class: 'hint' }, virtuals.map((v) => `${v.letter} is a virtual disk stored as a file on ${v.virtualOf}, so the two count as one disk.`).join(' ')) : null,
-    h('label', { class: 'check' },
-      h('input', { type: 'checkbox', checked: st.countLightroom, disabled: busy(), onchange: async (e) => {
-        state.dupes.settings = await api.invoke('dupes:settings', { countLightroom: e.target.checked });
-        rebuild();
-      } }),
-      'Count Lightroom\'s cloud copy as one of the two places'),
+    ...safeRulesControls(st, async (change) => {
+      state.dupes.settings = await api.invoke('dupes:settings', change);
+      state.safeRules = state.dupes.settings;
+      rebuild();
+    }, busy()),
     h('h3', {}, 'Which drive keeps its copy first'),
-    h('p', { class: 'hint' }, 'The first drive keeps its copy, then the next, until the file is in two places. On the same disk, a copy next to a project file is kept first, and one in a folder like "New folder", "Downloads" or "Dump" goes first.'),
+    h('p', { class: 'hint' }, `The first drive keeps its copy, then the next, until the file is in ${placesText(st.copies)}. On the same disk, a copy next to a project file is kept first, and one in a folder like "New folder", "Downloads" or "Dump" goes first.`),
     h('table', { class: 'compact' }, h('tbody', {}, st.order.map((o, i) => h('tr', {},
       h('td', {}, `${i + 1}.`), h('td', {}, h('strong', {}, o.letter), ` ${o.label || ''}`, o.connected ? '' : h('span', { class: 'offline' }, ' (not connected)')),
       h('td', {},

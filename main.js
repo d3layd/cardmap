@@ -201,6 +201,14 @@ function startJob(kind, fn, silent = false) {
   return j.id;
 }
 
+// What makes a file safe: how many verified copies it needs (on different disks, for
+// duplicates), and whether Lightroom's cloud copy counts as one. Used for "safe to
+// format" on cards and "safe to delete" on the Duplicates page.
+function safeRules() {
+  const s = getSettings(db);
+  return { copies: Math.min(5, Math.max(1, Number(s.safeCopies) || 2)), countLightroom: s.dupCountLightroom !== '0' };
+}
+
 function registerIpc() {
   ipcMain.handle('cards', async () => {
     await refreshDrives();
@@ -213,12 +221,12 @@ function registerIpc() {
     if (!drive) throw new Error('That card is no longer connected.');
     const { cardId, presentIds } = await scanCard(db, drive);
     present.set(cardId, presentIds);
-    return { ...cardSummary(db, cardId, presentIds), letter, mounted: true };
+    return { ...cardSummary(db, cardId, presentIds, safeRules()), letter, mounted: true };
   });
 
   ipcMain.handle('card:summary', (_e, cardId) => {
     const drive = driveFor(cardId);
-    const s = cardSummary(db, cardId, drive ? present.get(cardId) : null);
+    const s = cardSummary(db, cardId, drive ? present.get(cardId) : null, safeRules());
     return s && { ...s, letter: drive?.letter ?? null, mounted: Boolean(drive) };
   });
 
@@ -627,7 +635,7 @@ function registerIpc() {
     const full = [...order.filter((v) => vols.includes(v)), ...vols.filter((v) => !order.includes(v))];
     const info = db.prepare('SELECT label, last_letter FROM volumes WHERE serial = ?');
     return {
-      countLightroom: s.dupCountLightroom !== '0',
+      ...safeRules(),
       order: full.map((v) => {
         const now = volumesNow.find((x) => x.serial === v);
         const known = info.get(v) || {};
@@ -638,7 +646,7 @@ function registerIpc() {
   // What the report depends on: the library and the keep settings.
   const dupeSig = () => {
     const st = dupeSettings();
-    return librarySig(db, JSON.stringify([st.order.map((o) => o.serial), st.countLightroom]));
+    return librarySig(db, JSON.stringify([st.order.map((o) => o.serial), st.countLightroom, st.copies]));
   };
   const saveDupes = (report) => {
     dupeReport = report;
@@ -650,10 +658,11 @@ function registerIpc() {
     return { report: dupeReport, settings: dupeSettings(), stale: Boolean(dupeReport && saved && saved.sig !== dupeSig()), history: snapshots(db, 'dupes') };
   });
   ipcMain.handle('reports:history', (_e, kind) => snapshots(db, kind));
-  ipcMain.handle('dupes:settings', (_e, { order, countLightroom }) => {
+  ipcMain.handle('dupes:settings', (_e, { order, countLightroom, copies }) => {
     const set = {};
     if (order) set.dupOrder = JSON.stringify(order);
     if (countLightroom != null) set.dupCountLightroom = countLightroom ? '1' : '0';
+    if (copies != null) set.safeCopies = String(Math.min(5, Math.max(1, Math.round(Number(copies)) || 2)));
     setSettings(db, set);
     return dupeSettings();
   });
@@ -662,7 +671,7 @@ function registerIpc() {
     const phys = await physicalDrives();
     const st = dupeSettings();
     const priority = Object.fromEntries(st.order.map((o, i) => [o.serial, i]));
-    saveDupes(await buildReport(db, phys, { priority, countLightroom: st.countLightroom }, j, emit));
+    saveDupes(await buildReport(db, phys, { priority, countLightroom: st.countLightroom, minPlaces: st.copies }, j, emit));
     return dupeReport.totals;
   }));
   ipcMain.handle('dupes:recheck', (_e, shas) => startJob('recheck', (j, emit) => recheck(db, shas || [], j, emit)));
@@ -689,7 +698,7 @@ function registerIpc() {
       const st = dupeSettings();
       const priority = Object.fromEntries(st.order.map((o, i) => [o.serial, i]));
       const j = { get cancelled() { return Boolean(job || bg); } };
-      saveDupes(await buildReport(db, await physicalDrives(), { priority, countLightroom: st.countLightroom }, j, null));
+      saveDupes(await buildReport(db, await physicalDrives(), { priority, countLightroom: st.countLightroom, minPlaces: st.copies }, j, null));
       send('reports', { kind: 'dupes' });
     } catch {
       lastAuto = 0; // interrupted: try again next time

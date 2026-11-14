@@ -99,6 +99,10 @@ const { inventory, hashPending, matchCards, indexStatus } = require('../core/lib
   s = cardSummary(db, cardId, presentIds);
   console.log('summary after import:', JSON.stringify(s.totals), 'safeToFormat:', s.safeToFormat);
   assert.strictEqual(s.totals.safe, r1.copied);
+  // The safe rule follows the settings: one copy needed makes every copied file safe,
+  // five (without Lightroom) makes none of them safe with only primary + backup.
+  assert(cardSummary(db, cardId, presentIds, { copies: 1 }).totals.safe >= s.totals.safe);
+  assert.strictEqual(cardSummary(db, cardId, presentIds, { copies: 5, countLightroom: false }).totals.safe, 0);
 
   const roots = findOriginalsRoots('');
   console.log('lightroom originals:', roots.join(' | ') || '(none)');
