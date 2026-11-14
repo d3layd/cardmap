@@ -9,7 +9,7 @@ const state = {
   error: null,
   groupBy: 'date', // date | folder
   sel: new Set(),
-  form: { shoot: '', dest: '', backup: '' },
+  form: { shoot: '', dest: '', backup: '', extra: [], thenLightroom: false },
   settings: {},
   job: null,
   lastResult: null,
@@ -57,7 +57,7 @@ function dateTime(ms) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-const KIND = { primary: 'Main copy', backup: 'Backup', lightroom: 'Lightroom', found: 'Found', card: 'On card', index: 'In folder' };
+const KIND = { primary: 'Main copy', backup: 'Backup', extra: 'Extra copy', lightroom: 'Lightroom', found: 'Found', card: 'On card', index: 'In folder' };
 const busy = () => Boolean(state.job);
 const cardName = (c) => c.nickname || c.label || 'Untitled';
 const dirOf = (p) => p.slice(0, p.lastIndexOf('\\'));
@@ -168,6 +168,9 @@ function renderSidebar() {
       h('span', { class: 'grow' }, 'Library index', h('div', { class: 'sub', id: 'navbg' }, state.bg ? `Indexing${state.bg.bytesTotal ? ` ${Math.floor((state.bg.bytesDone / state.bg.bytesTotal) * 100)}%` : ''}` : state.newDrives.length ? `New drive connected` : ''))),
     h('button', { class: `nav-item${state.view === 'allfiles' ? ' active' : ''}`, onclick: () => show('allfiles') }, h('span', { class: 'grow' }, 'All files')),
     h('button', { class: `nav-item${state.view === 'dupes' ? ' active' : ''}`, onclick: () => show('dupes') }, h('span', { class: 'grow' }, 'Duplicates')),
+    h('button', { class: `nav-item${state.view === 'reconcile' ? ' active' : ''}`, onclick: () => show('reconcile') }, h('span', { class: 'grow' }, 'Drives')),
+    h('button', { class: `nav-item${state.view === 'compare' ? ' active' : ''}`, onclick: () => show('compare') }, h('span', { class: 'grow' }, 'Compare')),
+    h('button', { class: `nav-item${state.view === 'nearmatch' ? ' active' : ''}`, onclick: () => show('nearmatch') }, h('span', { class: 'grow' }, 'Near matches')),
     h('button', { class: `nav-item${state.view === 'lightroom' ? ' active' : ''}`, onclick: () => show('lightroom') }, h('span', { class: 'grow' }, 'Lightroom library')),
     h('button', { class: `nav-item${state.view === 'settings' ? ' active' : ''}`, onclick: () => show('settings') }, h('span', { class: 'grow' }, 'Settings')),
     past.length ? h('div', { class: 'nav-title' }, 'Earlier cards') : null,
@@ -188,6 +191,9 @@ function show(view) {
   if (view === 'index') loadIndex();
   if (view === 'dupes') loadDupes(true);
   if (view === 'allfiles') loadAllFiles();
+  if (view === 'reconcile') loadReconcile();
+  if (view === 'compare') loadCompare();
+  if (view === 'nearmatch') loadNearMatch();
   if (view === 'lightroom') loadEdits();
   render();
 }
@@ -226,6 +232,10 @@ function resultNotice() {
     text += x.method === 'catalog'
       ? ` Compared by checksum against ${x.catalogAssets} photos and videos in Lightroom's catalog.`
       : " Lightroom's catalog was not found, so only its local cache of recent files was checked.";
+  } else if (r.kind === 'copyplan') {
+    text = `${x.cancelled ? 'Copying stopped' : 'Second copies finished'}: ${x.copied} copied and verified, ${x.already} already there, ${x.failed} failed.`;
+    if (x.skippedDifferent) text += ` ${x.skippedDifferent} left alone because a different file with that name is already there.`;
+    if (x.needsRescan) text += ' Scan the destination drive so the new copies are indexed.';
   } else if (r.kind === 'dupes') {
     text = `Report built: ${bytes(x.safeBytes)} safe to delete, ${bytes(x.oneDiskBytes)} of extra copies on one disk.`;
   } else if (r.kind === 'recheck') {
@@ -320,15 +330,21 @@ function importPanel(s, rows, keys, unit) {
   const refresh = () => {
     const shoot = state.form.shoot.replace(/[<>:"/\\|?*]/g, ' ').replace(/\s+/g, ' ').trim();
     const folder = (d) => (shoot ? `${d} ${shoot}` : d);
-    const roots = [['Main copy', state.form.dest], ['Backup', state.form.backup]].filter(([, p]) => p);
+    const roots = [['Main copy', state.form.dest], ['Backup', state.form.backup],
+      ...state.form.extra.map((p, i) => [`Extra copy ${i + 1}`, p])].filter(([, p]) => p);
     if (!roots.length) {
       preview.replaceChildren(h('div', { class: 'none' }, 'Choose a "Copy to" folder to see where the files will go.'));
       return;
     }
     const names = dates ? dates.slice().sort().map(folder) : [folder('<capture date>')];
-    preview.replaceChildren(...roots.map(([label, root]) => h('div', { class: 'tree' },
+    const notes = roots.map(() => h('span', { class: 'none' }));
+    api.invoke('folders:state', roots.map(([, p]) => p)).then((states) => states.forEach((st, i) => {
+      notes[i].textContent = st === 'new' ? ' (new folder, will be created)' : st === 'offline' ? ' (drive not connected)' : '';
+      notes[i].className = st === 'offline' ? 'part' : 'none';
+    }));
+    preview.replaceChildren(...roots.map(([label, root], i) => h('div', { class: 'tree' },
       h('div', { class: 'none' }, label),
-      h('div', { class: 'root' }, root),
+      h('div', { class: 'root' }, root, notes[i]),
       names.slice(0, 4).map((n) => h('div', { class: 'leaf' }, `\\${n}\\`)),
       names.length > 4 ? h('div', { class: 'leaf none' }, `and ${names.length - 4} more date folders`) : null)));
   };
@@ -363,16 +379,33 @@ function importPanel(s, rows, keys, unit) {
       h('input', { type: 'text', value: state.form.shoot, placeholder: 'e.g. Smith Wedding', 'aria-label': 'Shoot name', oninput: onForm('shoot') })),
     folderInput('Copy to', 'dest', 'Folder for the main copy'),
     folderInput('Backup to (optional second copy)', 'backup', 'Ideally on a different drive'),
+    state.form.extra.map((p, i) => {
+      const input = h('input', { type: 'text', value: p, placeholder: 'Another folder that gets a copy', 'aria-label': `Extra copy ${i + 1}`,
+        oninput: (e) => { state.form.extra[i] = e.target.value.trim(); refresh(); } });
+      return h('div', { class: 'field' }, h('label', {}, `Also copy to (extra copy ${i + 1})`),
+        h('div', { class: 'row tight' }, input,
+          h('button', { class: 'btn', onclick: async () => {
+            const picked = await api.invoke('pickFolder', state.form.extra[i] || state.form.dest);
+            if (picked) { state.form.extra[i] = picked; input.value = picked; refresh(); }
+          } }, 'Browse'),
+          h('button', { class: 'btn', 'aria-label': `Remove extra copy ${i + 1}`, onclick: () => { state.form.extra.splice(i, 1); renderMain(); } }, 'Remove')));
+    }),
+    h('div', { class: 'row tight' },
+      h('button', { class: 'btn', onclick: () => { state.form.extra.push(''); renderMain(); } }, 'Add another destination'),
+      h('span', { class: 'none' }, 'Type a path that does not exist yet to make a new folder, or use New folder in Browse.')),
+    h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: state.form.thenLightroom,
+      onchange: (e) => { state.form.thenLightroom = e.target.checked; } }),
+      ' Then open Add to Lightroom for these files'),
     h('div', { class: 'field' }, h('label', {}, 'Folders that will be used'), preview),
 
     h('h3', {}, h('span', { class: 'step' }, '3'), 'What happens when you start'),
     h('ul', { class: 'steps' },
-      h('li', {}, 'Each file is copied into a folder for the day it was taken.'),
+      h('li', {}, 'Each file is copied into a folder for the day it was taken, in every destination above.'),
       h('li', {}, 'Every copy is read back and compared with the card. Only matching copies are recorded.'),
       h('li', {}, 'Files that are already copied are skipped, so it is safe to run again.'),
       h('li', {}, 'Nothing on the card is changed or deleted.')),
     h('button', { class: 'btn primary wide', disabled: busy() || !eligible,
-      onclick: () => run('import:start', { cardId: s.card.id, ...pick, onlyReady, shoot: state.form.shoot.trim(), dest: state.form.dest, backup: state.form.backup }) },
+      onclick: () => run('import:start', { cardId: s.card.id, ...pick, onlyReady, shoot: state.form.shoot.trim(), dest: state.form.dest, backup: state.form.backup, extra: state.form.extra.filter(Boolean) }) },
       !eligible ? (onlyReady ? 'No files marked ready' : 'Every file here is marked skip')
         : marked ? `Import ${eligible} file${eligible === 1 ? '' : 's'}`
         : todo === 0 ? `Check ${count} files again` : `Copy and verify ${todo} file${todo === 1 ? '' : 's'}`));
@@ -555,7 +588,7 @@ function cardView() {
       : s.safeExceptSkipped
         ? h('span', { class: 'badge warn', title: `Every file you did not mark skip has ${s.rules.copies} or more verified copies. Formatting loses the skipped ones.` },
             `Safe to format, apart from ${t.skip - t.skipSafe} file${t.skip - t.skipSafe === 1 ? '' : 's'} marked skip`)
-        : h('span', { class: 'badge warn', title: rulesTitle(s.rules) }, `Not safe to format: ${t.count - t.safe} files have fewer than ${s.rules.copies} verified ${s.rules.copies === 1 ? 'copy' : 'copies'}`);
+        : h('span', { class: 'badge warn', title: rulesTitle(s.rules) }, `Not safe to format: ${t.count - t.safe} files have verified copies on fewer than ${s.rules.copies} separate disk${s.rules.copies === 1 ? '' : 's'}`);
 
   const setGroup = (g) => { state.groupBy = g; defaultSelection(); renderMain(); };
 
@@ -609,7 +642,7 @@ function cardView() {
         g.lightroom < g.count ? h('div', {}, h('button', { class: 'link', title: 'See the files Lightroom does not have', onclick: () =>
           openFiles({ cardId: s.card.id, ...(byDate ? { date: g.key } : { folder: g.key }), lr: 'missing' }, `${g.key}: not in Lightroom`, `${title}. Files Lightroom has no record of, as of the last Lightroom check.`) },
           `see ${g.count - g.lightroom}`)) : null] },
-      { label: `${s.rules.copies}+ verified ${s.rules.copies === 1 ? 'copy' : 'copies'}`, num: true, value: (g) => g.safe, text: (g) => `${g.safe} of ${g.count}`, cell: (g) => tally(g.safe, g.count) },
+      { label: `On ${s.rules.copies}+ disk${s.rules.copies === 1 ? '' : 's'}`, num: true, value: (g) => g.safe, text: (g) => `${g.safe} of ${g.count}`, cell: (g) => tally(g.safe, g.count) },
       { label: 'Marked', value: (g) => g.ready * 1e6 + g.skip, text: (g) => markText(g), cell: (g) => (g.ready || g.skip ? markText(g) : h('span', { class: 'none' }, '')) },
     ], rows, { name: `${cardName(s.card)} by ${unit}` }),
   ]), s.mounted && state.drawer === 'import' ? importPanel(s, rows, keys, unit)
@@ -618,7 +651,7 @@ function cardView() {
     : state.drawer === 'local' ? localPanel(s) : null)];
 }
 
-const rulesTitle = (r) => `A file is safe with ${r.copies} verified ${r.copies === 1 ? 'copy' : 'copies'}${r.countLightroom ? ', Lightroom counting as one' : ', not counting Lightroom'}. Change this in Settings.`;
+const rulesTitle = (r) => `A file is safe with verified copies on ${r.copies} separate physical disk${r.copies === 1 ? '' : 's'}${r.countLightroom ? ', Lightroom counting as one' : ', not counting Lightroom'}. Two copies on one disk count once. Change this in Settings.`;
 
 // Files only on the card (not copied anywhere, not in Lightroom) that have not been marked
 // Ready or Skip yet: ask for them to be reviewed.
@@ -781,7 +814,7 @@ function safeRulesControls(rules, save, disabled) {
     rules.copies === 1
       ? h('div', { class: 'hint' }, h('strong', { class: 'part' }, 'With 1, a file in a single place counts as safe: there is no backup if that drive fails.'))
       : null,
-    h('div', { class: 'hint' }, `Used for "Safe to format" on cards (each file needs ${placesText(rules.copies)}) and "Safe to delete" on the Duplicates page (on different physical disks). The delete list always keeps at least one copy on your own drives.`),
+    h('div', { class: 'hint' }, `Used for "Safe to format" on cards and "Safe to delete" on the Duplicates page. Each file needs ${placesText(rules.copies)} on different physical disks: two copies on one disk count once. The delete list always keeps at least one copy on your own drives.`),
   ];
 }
 
@@ -815,6 +848,15 @@ function settingsView() {
       h('div', { class: 'hint' }, st.backupAt
         ? `A complete copy is saved once a day as ${st.backupFile.slice(st.backupFile.lastIndexOf('\\') + 1)} in the same folder. Last saved ${dateTime(st.backupAt)}.`
         : 'A complete copy is saved once a day in the same folder, starting 30 seconds after CardMap opens.'),
+      h('div', { class: 'row tight' },
+        h('span', {}, 'Also keep a copy on another drive:'),
+        st.backupDir2 ? h('code', {}, st.backupDir2) : h('span', { class: 'none' }, 'not set'),
+        h('button', { class: 'btn', onclick: async () => { const p = await api.invoke('pickFolder', st.backupDir2 || ''); if (p) { state.settings = await api.invoke('backup:setSecond', p); renderMain(); } } }, st.backupDir2 ? 'Change' : 'Choose a folder'),
+        st.backupDir2 ? h('button', { class: 'link', onclick: async () => { state.settings = await api.invoke('backup:setSecond', ''); renderMain(); } }, 'Stop') : null),
+      st.backupDir2 ? h('div', { class: 'hint' }, st.backup2SameDisk
+        ? h('strong', { class: 'part' }, 'That folder is on the same physical disk as the database, so it does not protect against that disk failing.')
+        : st.backup2At ? `Second copy last saved ${dateTime(st.backup2At)}. It is refreshed after each daily copy, and when that drive is connected.`
+          : 'No second copy there yet: its drive is not connected, or the first daily copy has not been made.') : null,
       h('div', { class: 'hint' }, 'To copy the database yourself, close CardMap first.')),
   ];
 }
@@ -1213,7 +1255,16 @@ function welcomeView() {
 }
 
 function renderMain() {
-  const views = { allfiles: allFilesView, dupes: dupesView, lookup: lookupView, card: cardView, files: filesView, map: mapView, index: indexView, lightroom: lightroomView, settings: settingsView, welcome: welcomeView };
+  // The Drives page, with the copy-plan drawer beside it when open.
+  const reconcilePage = () => {
+    const vol = state.reconcile && state.reconcile.vol;
+    const page = reconcileView();
+    page.splice(2, 0, resultNotice()); // under the heading and intro
+    if (!state.copyPlanOpen || !vol) return page;
+    return [h('div', { class: 'split' }, h('div', { class: 'split-main' }, page),
+      copyPlanPanel(vol, () => { state.copyPlanOpen = false; renderMain(); }))];
+  };
+  const views = { reconcile: reconcilePage, compare: compareView, nearmatch: nearMatchView, allfiles: allFilesView, dupes: dupesView, lookup: lookupView, card: cardView, files: filesView, map: mapView, index: indexView, lightroom: lightroomView, settings: settingsView, welcome: welcomeView };
   document.getElementById('main').replaceChildren(...views[state.view]().flat(Infinity).filter(Boolean));
 }
 
@@ -1327,12 +1378,14 @@ api.on('job', async (p) => {
   if (p.done) {
     state.job = null;
     if (!p.silent || p.error) state.lastResult = p;
+    if (p.kind === 'import' && !p.error && state.form.thenLightroom && state.view === 'card') state.drawer = 'lightroom';
     await refreshSummary();
     if (state.view === 'map') await loadMap();
     if (state.view === 'lightroom') await Promise.all([loadLightroom(), loadEdits()]);
     if (state.view === 'allfiles') await loadAllFiles();
     if (state.view === 'index') await loadIndex();
     if (p.kind === 'dupes' || state.view === 'dupes') await loadDupes(false);
+    if (state.view === 'reconcile') await loadReconcile(state.reconcile && state.reconcile.vol);
     if (p.kind === 'recheck' && !p.error && !(p.result && p.result.cancelled)) { render(); run('dupes:build'); return; }
     if (state.view === 'files') state.files.rows = await api.invoke('files', state.files.query);
     render();
@@ -1350,6 +1403,7 @@ api.on('job', async (p) => {
   state.cardBg = await api.invoke('cardbg:status');
   state.form.dest = state.settings.dest || '';
   state.form.backup = state.settings.backup || '';
+  state.form.extra = state.settings.extra || [];
   await loadCards();
   render();
 })();

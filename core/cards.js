@@ -50,8 +50,12 @@ async function scanCard(db, drive, job, emit) {
  */
 function cardSummary(db, cardId, presentIds, rules = {}) {
   // How many verified copies make a file safe, and whether Lightroom counts as one.
+  // Copies count once per physical disk: two copies on one drive (or on a virtual disk
+  // and the disk holding its file) are one place. diskOf(path) names a path's disk;
+  // without it, each drive letter counts as its own disk.
   const need = rules.copies || 2;
   const countLr = rules.countLightroom !== false;
+  const diskOf = rules.diskOf || ((p) => String(p).slice(0, 2).toUpperCase());
   const card = db.prepare('SELECT * FROM cards WHERE id = ?').get(cardId);
   if (!card) return null;
   let files = db.prepare('SELECT id, rel_path, size, capture_date, shoot, mark FROM files WHERE card_id = ?').all(cardId);
@@ -85,7 +89,8 @@ function cardSummary(db, cardId, presentIds, rules = {}) {
     const ls = byFile.get(f.id) || [];
     const copied = ls.some((l) => l.kind !== 'lightroom');
     const lr = ls.some((l) => l.kind === 'lightroom');
-    const safe = ls.filter((l) => l.kind !== 'lightroom').length + (countLr && lr ? 1 : 0) >= need;
+    const disks = new Set(ls.filter((l) => l.kind !== 'lightroom').map((l) => diskOf(l.path)));
+    const safe = disks.size + (countLr && lr ? 1 : 0) >= need;
     for (const t of [g, d, totals]) {
       t.count += 1;
       t.bytes += f.size;

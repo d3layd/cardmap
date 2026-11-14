@@ -7,6 +7,9 @@ const assert = require('node:assert');
 const { openDb } = require('../core/db');
 const { listCardDrives } = require('../core/drives');
 const { scanCard, cardSummary } = require('../core/cards');
+// The test's folders all sit on one drive; treat each folder as its own disk so the
+// two-copies rule can be exercised.
+const eachFolder = { diskOf: (p) => require('node:path').dirname(require('node:path').dirname(p)) };
 const { runImport } = require('../core/importer');
 const { setMarks, cardLog } = require('../core/marks');
 const { findOriginalsRoots, runLightroomCheck } = require('../core/lightroom');
@@ -32,7 +35,7 @@ const { inventory, hashPending, matchCards, indexStatus } = require('../core/lib
 
   let t = Date.now();
   const { cardId, presentIds } = await scanCard(db, drive, job);
-  let s = cardSummary(db, cardId, presentIds);
+  let s = cardSummary(db, cardId, presentIds, eachFolder);
   console.log(`scan ${drive.letter}: ${s.totals.count} files, ${(s.totals.bytes / 1e9).toFixed(1)} GB, ${s.groups.length} dates, ${Date.now() - t} ms`);
   console.log('dates:', s.groups.map((g) => `${g.key}(${g.count})`).join(' '));
   console.log('folders:', s.folders.map((g) => `${g.key}(${g.count})`).join(' '));
@@ -96,12 +99,14 @@ const { inventory, hashPending, matchCards, indexStatus } = require('../core/lib
   console.log('folder scan after move:', JSON.stringify(fsr));
   assert.strictEqual(fsr.matched, r1.copied);
 
-  s = cardSummary(db, cardId, presentIds);
+  s = cardSummary(db, cardId, presentIds, eachFolder);
   console.log('summary after import:', JSON.stringify(s.totals), 'safeToFormat:', s.safeToFormat);
   assert.strictEqual(s.totals.safe, r1.copied);
+  // Primary and backup are on the same drive here: by the real rule that is one disk, not two.
+  assert.strictEqual(cardSummary(db, cardId, presentIds, {}).totals.safe, 0);
   // The safe rule follows the settings: one copy needed makes every copied file safe,
   // five (without Lightroom) makes none of them safe with only primary + backup.
-  assert(cardSummary(db, cardId, presentIds, { copies: 1 }).totals.safe >= s.totals.safe);
+  assert(cardSummary(db, cardId, presentIds, { copies: 1, ...eachFolder }).totals.safe >= s.totals.safe);
   assert.strictEqual(cardSummary(db, cardId, presentIds, { copies: 5, countLightroom: false }).totals.safe, 0);
 
   const roots = findOriginalsRoots('');
@@ -203,6 +208,18 @@ const { inventory, hashPending, matchCards, indexStatus } = require('../core/lib
   // Importing by card folder instead of by date.
   const r5 = await runImport(db, { cardId, letter: drive.letter, folders: [byDate[0].folder], shoot: '', dest: path.join(work, 'byfolder'), maxFiles: 1 }, job, () => {});
   console.log('import by folder:', JSON.stringify(r5));
+  // Extra destinations: each new folder gets its own verified copy, and a re-run skips them.
+  {
+    const extra = [path.join(work, 'extra-a', 'new', 'folder'), path.join(work, 'extra-b')];
+    const opts = { cardId, letter: drive.letter, folders: [byDate[0].folder], shoot: '', dest: path.join(work, 'byfolder'), extra, maxFiles: 1 };
+    const rx = await runImport(db, opts, job, () => {});
+    assert.strictEqual(rx.copied, 1);
+    for (const x of extra) assert.strictEqual(fs.readdirSync(path.join(x, fs.readdirSync(x)[0])).length, 1);
+    const again = await runImport(db, opts, job, () => {});
+    assert.strictEqual(again.copied, 0);
+    assert.strictEqual(again.skipped, 1);
+    console.log('import to 2 extra folders:', JSON.stringify({ copied: rx.copied, rerunSkipped: again.skipped }));
+  }
   assert.strictEqual(r5.copied + r5.skipped, 1);
   // Marks: a file marked skip is never imported; with onlyReady only ready files are.
   if (byDate.length >= 2) {
@@ -215,12 +232,12 @@ const { inventory, hashPending, matchCards, indexStatus } = require('../core/lib
     assert.strictEqual(r7.copied + r7.skipped, 1);
     assert.strictEqual(r7.leftOut.skip, 1);
     assert.strictEqual(r7.leftOut.unready, byDate.length - 2);
-    const sm = cardSummary(db, cardId, presentIds);
+    const sm = cardSummary(db, cardId, presentIds, eachFolder);
     assert.strictEqual(sm.totals.ready, 1);
     assert.strictEqual(sm.totals.skip, 1);
     // The only-on-card list matches the summary's count.
     const onlyOnCard = listFiles(db, { cardId, unsaved: true }).length;
-    assert.strictEqual(onlyOnCard, cardSummary(db, cardId, presentIds).totals.unsaved);
+    assert.strictEqual(onlyOnCard, cardSummary(db, cardId, presentIds, eachFolder).totals.unsaved);
     assert(sm.totals.unreviewed <= sm.totals.unsaved);
     const log = cardLog(db, cardId);
     assert.deepStrictEqual(log.slice(0, 3).map((l) => l.action), ['import', 'ready', 'skip']); // earlier imports are logged too

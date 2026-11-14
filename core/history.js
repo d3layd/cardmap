@@ -55,6 +55,9 @@ function recordScan(db, volumes, reason, methods = {}) {
   const ins = db.prepare(
     'INSERT INTO drive_history (at, day, vol, letter, label, reason, files, bytes, hashed, added, removed, size, free, method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
   );
+  // A scan that finds nothing changed since the same day's last scan of that drive
+  // updates that row instead of adding an identical one (CardMap opened several times).
+  const touch = db.prepare('UPDATE drive_history SET at = ?, method = ?, size = ?, free = ? WHERE id = ?');
   for (const v of volumes) {
     const t = totals(db, v.serial);
     const prev = last.get(v.serial);
@@ -62,6 +65,18 @@ function recordScan(db, volumes, reason, methods = {}) {
     const since = prev ? prev.at.replace('T', ' ').slice(0, 19) : '';
     const added = prev ? addedSince.get(v.serial, since).n : 0; // nothing to compare the first record with
     const removed = prev ? Math.max(0, prev.files + added - t.files) : 0;
+    const method = methods[v.serial] || 'walk';
+    // Only fold into a row of the same kind of check, or a full walk over a quick one, so
+    // "last walked" stays true.
+    const sameDay = prev && prev.reason !== 'changes' && prev.day === localDay(now) && prev.letter === v.letter;
+    const same = sameDay && (method === 'walk' || (prev.method || 'walk') === method);
+    const unchanged = same && prev.files === t.files && prev.bytes === t.bytes && prev.hashed === t.hashed && !added && !removed;
+    // Keep the first record of a drive as it is: it marks when tracking began.
+    const first = unchanged && db.prepare('SELECT min(id) AS id FROM drive_history WHERE vol = ?').get(v.serial).id === prev.id;
+    if (unchanged && !first) {
+      touch.run(now.toISOString(), method, v.size || prev.size, v.free || prev.free, prev.id);
+      continue;
+    }
     ins.run(now.toISOString(), localDay(now), v.serial, v.letter, v.label || '', reason, t.files, t.bytes, t.hashed, added, removed, v.size || null, v.free || null, methods[v.serial] || 'walk');
   }
 }

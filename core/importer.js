@@ -71,7 +71,8 @@ function folderFor(date, shoot) {
  * Every copy is re-read from the destination and compared to the card file's
  * checksum before it is recorded. The card is only ever read.
  *
- * opts: { cardId, letter, dates[], shoot, dest, backup, maxFiles, onlyReady }
+ * opts: { cardId, letter, dates[], shoot, dest, backup, extra[], maxFiles, onlyReady }
+ * extra: any number of further folders that each get a verified copy too.
  * Files marked "skip" are never copied; with onlyReady only files marked "ready" are.
  */
 async function runImport(db, opts, job, emit) {
@@ -84,6 +85,11 @@ async function runImport(db, opts, job, emit) {
   }
   const roots = [{ kind: 'primary', root: dest }];
   if (backup) roots.push({ kind: 'backup', root: backup });
+  const norm = (p) => path.resolve(p).toLowerCase().replace(/\\+$/, '');
+  for (const x of opts.extra || []) {
+    if (!x || roots.some((r) => norm(r.root) === norm(x))) continue; // empty, or the same folder twice
+    roots.push({ kind: 'extra', root: x });
+  }
 
   // Only files that are on the card right now: ones deleted in-camera since are left out.
   let files = db
@@ -106,7 +112,10 @@ async function runImport(db, opts, job, emit) {
   const work = [];
   let bytesTotal = 0;
   for (const f of files) {
-    const need = roots.filter((r) => !locStmt.all(f.id, r.kind).some((l) => pathExists(l.path, l.vol)));
+    // An extra destination is done only when the file has a copy inside that folder;
+    // the main copy and the backup are done when the file has one anywhere.
+    const need = roots.filter((r) => !locStmt.all(f.id, r.kind).some((l) =>
+      pathExists(l.path, l.vol) && (r.kind !== 'extra' || l.path.toLowerCase().startsWith(`${norm(r.root)}\\`))));
     if (need.length) bytesTotal += f.size;
     work.push({ f, need });
   }

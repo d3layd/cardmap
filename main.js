@@ -9,6 +9,10 @@ const { DatabaseSync } = require('node:sqlite');
 const { openDb, getSettings, setSettings } = require('./core/db');
 const { lookup } = require('./core/lookup');
 const { fileMap } = require('./core/filemap');
+const { driveGaps } = require('./core/reconcile');
+const { compareSides, listSides } = require('./core/compare');
+const { nearMatches } = require('./core/nearmatch');
+const { buildPlan, runPlan } = require('./core/copyplan');
 const { recordScan, recordChanges, history, drivesOverTime } = require('./core/history');
 const { createWatcher } = require('./core/watch');
 const winsearch = require('./core/winsearch');
@@ -56,6 +60,37 @@ function dailyBackup() {
     fs.renameSync(tmp, bak); // replaces yesterday's copy only once today's is complete
   } catch (e) {
     console.error('CardMap backup failed:', e.message);
+  }
+  copyBackupElsewhere();
+}
+
+// The folder on another drive that also gets the daily copy (a setting), where it is now.
+const secondBackupDir = () => {
+  try {
+    return currentPath(JSON.parse(getSettings(db).backupDir2Pin || 'null')) || '';
+  } catch {
+    return '';
+  }
+};
+const secondBackupFile = () => (secondBackupDir() ? path.join(secondBackupDir(), 'cardmap.backup.db') : null);
+
+/**
+ * Put the latest daily copy in the second folder too, so the database is not only on
+ * one drive. Does nothing when no folder is set, its drive is away, or it is up to date.
+ */
+function copyBackupElsewhere() {
+  try {
+    const pinned = JSON.parse(getSettings(db).backupDir2Pin || 'null');
+    const bak = backupFile();
+    if (!pinned || !online(pinned.vol) || !fs.existsSync(bak)) return;
+    const dest = secondBackupFile();
+    if (fs.existsSync(dest) && fs.statSync(dest).mtimeMs >= fs.statSync(bak).mtimeMs) return;
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    const tmp = `${dest}.tmp`;
+    fs.copyFileSync(bak, tmp);
+    fs.renameSync(tmp, dest); // the old copy is replaced only once the new one is complete
+  } catch (e) {
+    console.error('CardMap second backup failed:', e.message);
   }
 }
 const { listDrives, physicalDrives } = require('./core/drives');
@@ -206,8 +241,17 @@ function startJob(kind, fn, silent = false) {
 // format" on cards and "safe to delete" on the Duplicates page.
 function safeRules() {
   const s = getSettings(db);
-  return { copies: Math.min(5, Math.max(1, Number(s.safeCopies) || 2)), countLightroom: s.dupCountLightroom !== '0' };
+  return { copies: Math.min(5, Math.max(1, Number(s.safeCopies) || 2)), countLightroom: s.dupCountLightroom !== '0', diskOf };
 }
+
+// Which physical disk each drive letter is on (a virtual disk counts as the disk holding
+// its file). Read from Windows at start and whenever drives come or go.
+let physByLetter = {};
+const diskOf = (p) => {
+  const letter = String(p).slice(0, 2).toUpperCase();
+  return (physByLetter[letter] && physByLetter[letter].id) || `letter:${letter}`;
+};
+const refreshPhys = () => physicalDrives().then((r) => { if (Object.keys(r).length) physByLetter = r; });
 
 function registerIpc() {
   ipcMain.handle('cards', async () => {
@@ -236,6 +280,7 @@ function registerIpc() {
     setSettings(db, {
       dest: opts.dest || '', backup: opts.backup || '',
       destPin: opts.dest ? JSON.stringify(pin(opts.dest)) : '', backupPin: opts.backup ? JSON.stringify(pin(opts.backup)) : '',
+      extraPins: JSON.stringify((opts.extra || []).filter(Boolean).map((p) => pin(p))),
     });
     return startJob('import', (j, emit) => runImport(db, { ...opts, letter: drive.letter }, j, emit));
   });
@@ -540,6 +585,8 @@ function registerIpc() {
   };
   const markKnown = (serials) => setSettings(db, { knownDrives: JSON.stringify([...new Set([...(knownDrives() || []), ...serials])]) });
   onVolumesChanged = (added, first) => {
+    refreshPhys();
+    if (!first) copyBackupElsewhere(); // the backup drive may have just been connected
     if (knownDrives() === null) markKnown(volumesNow.map((v) => v.serial)); // first run: only drives that turn up later count as new
     if (first) return;
     const folderVolSet = new Set(folderVols());
@@ -610,6 +657,26 @@ function registerIpc() {
   // ----- Every unique file, its copies, and whether Lightroom has it -----
   ipcMain.handle('filemap', (_e, opts) => fileMap(db, opts || {}));
 
+  // ----- Reconciling drives: what is only on one drive, comparing two places, and
+  // Lightroom assets that probably have a converted local copy -----
+  // A drive's physical disk, so two letters on one disk count as one place.
+  const diskOfVol = (vol) => {
+    const v = volumesNow.find((x) => x.serial === vol);
+    return v ? diskOf(v.letter) : `vol:${vol}`;
+  };
+  ipcMain.handle('reconcile:get', (_e, opts) => driveGaps(db, { ...(opts || {}), countLightroom: safeRules().countLightroom, diskOf: diskOfVol }));
+  ipcMain.handle('compare:sides', () => listSides(db));
+  ipcMain.handle('compare:run', (_e, arg) => compareSides(db, arg || {}));
+  ipcMain.handle('nearmatch:get', () => nearMatches(db, { limit: 1000 }));
+  // Second copies of the files that are only on one drive. Only ever writes new files
+  // under the chosen folder; the source drive is read, never changed.
+  const planOpts = (o) => ({ vol: o.vol, folder: o.folder, dest: o.dest, countLightroom: safeRules().countLightroom, diskOf: diskOfVol });
+  ipcMain.handle('copyplan:build', (_e, o) => {
+    const p = buildPlan(db, planOpts(o || {}));
+    return { ...p, rows: p.rows.slice(0, 200) }; // the panel only needs totals and a sample
+  });
+  ipcMain.handle('copyplan:start', (_e, o) => startJob('copyplan', (j, emit) => runPlan(db, planOpts(o || {}), j, emit)));
+
   // ----- Archiving Lightroom edits -----
   const archiveDir = () => getSettings(db).lrArchiveDir || path.join(path.dirname(dbFile), 'Lightroom archive');
   ipcMain.handle('lredits:status', () => ({ ...editsStatus(db, findCatalogs('')), dest: archiveDir() }));
@@ -635,7 +702,8 @@ function registerIpc() {
     const full = [...order.filter((v) => vols.includes(v)), ...vols.filter((v) => !order.includes(v))];
     const info = db.prepare('SELECT label, last_letter FROM volumes WHERE serial = ?');
     return {
-      ...safeRules(),
+      copies: safeRules().copies,
+      countLightroom: safeRules().countLightroom,
       order: full.map((v) => {
         const now = volumesNow.find((x) => x.serial === v);
         const known = info.get(v) || {};
@@ -812,11 +880,16 @@ function registerIpc() {
       // The remembered folders, at whatever letter their drive has today.
       dest: currentPath(readPin(s.destPin)) || s.dest || '',
       backup: currentPath(readPin(s.backupPin)) || s.backup || '',
+      extra: (readPin(s.extraPins) || []).map((p) => currentPath(p)).filter(Boolean),
       lightroomDetected: lightroomRoots(),
       lightroomCatalogs: findCatalogs(''),
       dbFile,
       backupFile: dbFile ? backupFile() : null,
       backupAt: dbFile && fs.existsSync(backupFile()) ? fs.statSync(backupFile()).mtimeMs : null,
+      // The second copy, on another drive.
+      backupDir2: secondBackupDir(),
+      backup2At: secondBackupFile() && fs.existsSync(secondBackupFile()) ? fs.statSync(secondBackupFile()).mtimeMs : null,
+      backup2SameDisk: Boolean(secondBackupDir()) && diskOf(secondBackupDir()) === diskOf(dbFile),
     };
   };
   ipcMain.handle('settings:get', settingsOut);
@@ -826,6 +899,23 @@ function registerIpc() {
     if (obj && 'autoIndex' in obj) refreshWatch();
     return settingsOut();
   });
+
+  // Choose (or clear, with '') the folder on another drive for the second daily copy.
+  ipcMain.handle('backup:setSecond', (_e, dir) => {
+    setSettings(db, { backupDir2Pin: dir ? JSON.stringify(pin(dir)) : '' });
+    if (dir) {
+      if (!fs.existsSync(backupFile())) dailyBackup();
+      else copyBackupElsewhere();
+    }
+    return settingsOut();
+  });
+
+  // For each folder: 'exists', 'new' (will be created) or 'offline' (its drive is not there).
+  ipcMain.handle('folders:state', (_e, list) => (list || []).map((p) => {
+    if (!p) return '';
+    if (fs.existsSync(p)) return 'exists';
+    return fs.existsSync(path.parse(path.resolve(p)).root) ? 'new' : 'offline';
+  }));
 
   ipcMain.handle('pickFolder', async (_e, startAt) => {
     const r = await dialog.showOpenDialog(win, {
@@ -869,6 +959,11 @@ function createWindow() {
           await win.webContents.executeJavaScript(`window.__show && window.__show(${JSON.stringify(process.env.CARDMAP_VIEW)})`);
           await new Promise((r) => setTimeout(r, Number(process.env.CARDMAP_SETTLE || 1500)));
         }
+        // CARDMAP_JS: a line of page script to run first, e.g. to open a panel for the shot.
+        if (process.env.CARDMAP_JS) {
+          await win.webContents.executeJavaScript(process.env.CARDMAP_JS).catch((e) => errors.push(`CARDMAP_JS: ${e.message}`));
+          await new Promise((r) => setTimeout(r, Number(process.env.CARDMAP_SETTLE || 1500)));
+        }
         win.show();
         win.focus();
         await new Promise((r) => setTimeout(r, 400));
@@ -886,8 +981,12 @@ app.whenReady().then(() => {
   dbFile = process.env.CARDMAP_DB || defaultDbPath();
   fs.mkdirSync(path.dirname(dbFile), { recursive: true });
   db = openDb(dbFile);
-  if (!process.env.CARDMAP_SHOT) setTimeout(dailyBackup, 30000);
+  if (!process.env.CARDMAP_SHOT) {
+    setTimeout(dailyBackup, 30000);
+    setInterval(dailyBackup, 6 * 60 * 60 * 1000); // CardMap may stay open for days
+  }
   registerIpc();
+  refreshPhys();
   createWindow();
   refreshDrives();
   setInterval(refreshDrives, 5000);
