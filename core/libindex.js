@@ -334,6 +334,7 @@ async function matchCards(db, opts, job, emit) {
     .all(...(opts.cardId ? [opts.cardId] : []));
   const bySha = db.prepare('SELECT * FROM lib_files WHERE sha256 = ?');
   const unhashed = db.prepare('SELECT * FROM lib_files WHERE size = ? AND sha256 IS NULL AND failed = 0');
+  const hashedSameSize = db.prepare('SELECT 1 FROM lib_files WHERE size = ? AND sha256 IS NOT NULL LIMIT 1');
   const setCardSha = db.prepare('UPDATE files SET sha256 = ? WHERE id = ?');
   const setQuick = db.prepare('UPDATE lib_files SET quick = ? WHERE id = ?');
   const setSha = db.prepare("UPDATE lib_files SET sha256 = ?, hashed_at = datetime('now') WHERE id = ?");
@@ -381,6 +382,19 @@ async function matchCards(db, opts, job, emit) {
       } catch (e) {
         if (e.cancelled) throw e;
         setFailed.run(row.id);
+      }
+    }
+    // The card file has no checksum yet but an indexed file with one is the same size:
+    // read the card file once so the lookup below can find it.
+    if (!sha && !onCard && hashedSameSize.get(f.size)) result.unverifiable += 1;
+    if (!sha && onCard && hashedSameSize.get(f.size)) {
+      try {
+        progress({ label: `Reading ${f.name} from the card to compare`, filesDone: done, filesTotal: files.length });
+        sha = await hashFile(src, job);
+        setCardSha.run(sha, f.id);
+        result.read += 1;
+      } catch (e) {
+        if (e.cancelled) throw e;
       }
     }
     if (sha) {
@@ -491,15 +505,23 @@ function indexStatus(db, folders) {
   };
 }
 
-/** List the folders, then match card files against the index. Used by "Find local copies". */
+/**
+ * Match card files against the whole library index (scanned drives and your folders).
+ * Any folders given are listed first so files added since the last index run are included.
+ * Used by "Find local copies".
+ */
 async function runFolderScan(db, opts, job, emit) {
+  ensure(db);
   const folders = (opts.folders || (opts.folder ? [opts.folder] : [])).filter(Boolean);
-  if (!folders.length) throw new Error('Choose at least one folder to search.');
-  const inv = await inventory(db, folders, job, emit);
-  if (inv.skippedFolders.length === folders.length) throw new Error(`Not found: ${inv.skippedFolders.join(', ')}`);
+  let inv = { files: 0, skippedFolders: [], cancelled: false };
+  if (folders.length) {
+    inv = await inventory(db, folders, job, emit);
+    if (opts.folder && inv.skippedFolders.length === folders.length) throw new Error(`Not found: ${inv.skippedFolders.join(', ')}`);
+  }
   const m = inv.cancelled ? { matched: 0, renamed: 0, alreadyKnown: 0, unverifiable: 0, ruledOutEarly: 0, filesWithCopies: 0, cancelled: true }
     : await matchCards(db, { cardId: opts.cardId || null, mounted: opts.mounted || {} }, job, emit);
-  return { scanned: inv.files, ...m, skippedFolders: inv.skippedFolders };
+  const indexed = db.prepare('SELECT count(*) AS n FROM lib_files').get().n;
+  return { scanned: inv.files, indexed, ...m, skippedFolders: inv.skippedFolders };
 }
 
 module.exports = { inventory, discover, foundFolders, foundPrefixes, dropScanned, dropWholeDrive, matchCards, hashPending, indexStatus, runFolderScan };

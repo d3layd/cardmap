@@ -229,7 +229,7 @@ function resultNotice() {
       ? `Lightroom's catalog was read: ${x.read.toLocaleString()} changed entries picked up. The cache now holds ${x.assets.toLocaleString()} photos and videos in ${x.albums.toLocaleString()} albums.`
       : 'Already up to date: Lightroom has not changed its catalog since the last read.';
   } else if (r.kind === 'folderscan') {
-    text = `Search${x.cancelled ? ' cancelled' : ' finished'}: ${x.scanned.toLocaleString()} files looked at. ${x.filesWithCopies} card file${x.filesWithCopies === 1 ? ' has' : 's have'} a matching local copy (${x.matched} newly recorded, ${x.alreadyKnown} already known).`;
+    text = `Match${x.cancelled ? ' cancelled' : ' finished'}: checked against ${(x.indexed ?? x.scanned).toLocaleString()} indexed files. ${x.filesWithCopies} card file${x.filesWithCopies === 1 ? ' has' : 's have'} a matching local copy (${x.matched} newly recorded, ${x.alreadyKnown} already known).`;
     if (x.renamed) text += ` ${x.renamed} of the new matches had a different file name.`;
     if (x.lookups != null) text += ` ${x.lookups} were matched straight from the index; ${x.read} local files had to be read.`;
     if (x.unverifiable) text += ` ${x.unverifiable} possible matches need their card inserted to confirm.`;
@@ -342,26 +342,25 @@ function importPanel(s, rows, keys, unit) {
       todo === 0 ? `Check ${count} files again` : `Copy and verify ${todo} file${todo === 1 ? '' : 's'}`));
 }
 
-/** The "Find local copies" panel: match this card's files to files already on your drives. */
+/** The "Find local copies" panel: match this card's files against the library index. */
 function localPanel(s) {
-  const list = h('div', { class: 'folderlist' });
+  const cover = h('div', { class: 'folderlist' }, h('div', { class: 'none' }, 'Loading the index'));
   const start = h('button', { class: 'btn primary wide', disabled: true,
-    onclick: () => run('folderscan:start', { folders: (state.libFolders || []).filter((f) => f.exists).map((f) => f.path), cardId: s.card.id }) },
-    'Search these folders');
-  const draw = () => {
-    const folders = state.libFolders || [];
-    list.replaceChildren(...(folders.length
-      ? folders.map((f) => h('div', { class: 'folderrow' },
-          h('span', { class: `dir${f.exists ? '' : ' missing'}` }, f.exists ? f.path : `${f.path} (not connected)`),
-          h('button', { class: 'link', 'aria-label': `Remove ${f.path}`, onclick: async () => {
-            state.libFolders = await api.invoke('library:setFolders', folders.filter((x) => x.path !== f.path).map((x) => x.path));
-            draw();
-          } }, 'Remove')))
-      : [h('div', { class: 'none' }, 'No folders yet. Add the folders or drives where you keep photos and video.')]));
-    start.disabled = busy() || !folders.some((f) => f.exists);
-  };
-  if (state.libFolders) draw();
-  api.invoke('library:folders').then((f) => { state.libFolders = f; draw(); });
+    onclick: () => run('folderscan:start', { cardId: s.card.id }) }, 'Match against the index');
+  api.invoke('index:status').then((ix) => {
+    const drives = (ix.drives || []).filter((d) => d.selected);
+    const folders = ix.folders || [];
+    const rows = [
+      ...drives.map((d) => h('div', { class: 'folderrow' }, h('span', { class: 'dir' }, `${d.letter} ${d.label || ''}`.trim() + ' (whole drive, imported media only)'))),
+      ...folders.map((f) => h('div', { class: 'folderrow' }, h('span', { class: `dir${f.exists ? '' : ' missing'}` }, f.exists ? f.path : `${f.path} (not connected)`))),
+    ];
+    cover.replaceChildren(
+      h('div', { class: 'hint' }, ix.files
+        ? `${ix.files.toLocaleString()} files indexed, ${ix.hashed.toLocaleString()} with a checksum.`
+        : 'The index is empty. Add drives or folders under Library index first.'),
+      ...(rows.length ? rows : [h('div', { class: 'none' }, 'No drives or folders chosen yet.')]));
+    start.disabled = busy() || !ix.files;
+  });
 
   return h('aside', { class: 'drawer', 'aria-label': 'Find local copies' },
     h('div', { class: 'row' }, h('h2', {}, 'Find local copies'), h('span', { class: 'spacer' }),
@@ -369,22 +368,17 @@ function localPanel(s) {
 
     h('h3', {}, h('span', { class: 'step' }, '1'), 'What it does'),
     h('ul', { class: 'steps' },
-      h('li', {}, `Looks through your folders for files that are the same as the ${s.totals.count} on this card.`),
+      h('li', {}, `Looks through the library index for files that are the same as the ${s.totals.count} on this card.`),
       h('li', {}, 'A file counts as a copy only when its contents match exactly, by checksum. The file name does not matter, so renamed copies are found.'),
-      h('li', {}, 'Files already in the library index are matched instantly. Others are read once and their checksum is saved for next time.'),
+      h('li', {}, 'Indexed files with a checksum are matched instantly. Others of the same size are read once and their checksum is saved for next time.'),
       h('li', {}, 'Nothing is copied, moved or changed. Matches are recorded and show up in the Copied column.')),
 
-    h('h3', {}, h('span', { class: 'step' }, '2'), 'Where to look'),
-    list,
-    h('button', { class: 'btn wide', onclick: async () => {
-      const p = await api.invoke('pickFolder', '');
-      if (!p) return;
-      state.libFolders = await api.invoke('library:setFolders', [...(state.libFolders || []).map((x) => x.path), p]);
-      draw();
-    } }, 'Add a folder'),
-    h('div', { class: 'hint' }, 'These folders are remembered for next time. For a whole drive, tick it under Library index instead, so only imported media is looked at.'),
+    h('h3', {}, h('span', { class: 'step' }, '2'), 'What the index covers'),
+    cover,
+    h('button', { class: 'btn wide', onclick: () => { state.drawer = null; show('index'); } }, 'Change this in Library index'),
+    h('div', { class: 'hint' }, 'Your folders are listed again first, so files added since the last index run are included.'),
 
-    h('h3', {}, h('span', { class: 'step' }, '3'), 'Search'),
+    h('h3', {}, h('span', { class: 'step' }, '3'), 'Match'),
     h('div', { class: 'hint' }, s.mounted ? 'Keep the card in: matching files are read from it to compare.' : 'The card is not connected, so only files CardMap has already read can be matched.'),
     start);
 }

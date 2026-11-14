@@ -215,11 +215,13 @@ function registerIpc() {
     );
   });
 
-  // Search folders on disk for copies of card files. arg: a folder path, or { folders, cardId }.
+  // Match card files against the library index. arg: a folder path to list first, or
+  // { cardId }: then the index's own folders are refreshed and the whole index is matched.
   ipcMain.handle('folderscan:start', (_e, arg) => {
-    const opts = typeof arg === 'string' ? { folders: [arg] } : arg || {};
+    const opts = typeof arg === 'string' ? { folder: arg } : arg || {};
+    const folders = opts.folder ? null : libraryFolders().filter((f) => f.exists).map((f) => f.path);
     const mounted = Object.fromEntries(drives.map((d) => [d.serial, d.letter]));
-    return startJob('folderscan', (j, emit) => runFolderScan(db, { folders: opts.folders, cardId: opts.cardId || null, mounted }, j, emit));
+    return startJob('folderscan', (j, emit) => runFolderScan(db, { folder: opts.folder, folders, cardId: opts.cardId || null, mounted }, j, emit));
   });
 
   // The folders the user keeps media in, remembered for "Find local copies".
