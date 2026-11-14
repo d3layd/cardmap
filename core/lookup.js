@@ -1,11 +1,11 @@
 // Find a file anywhere CardMap knows about: on a card, in your folders (library index
 // and recorded copies), or in the Lightroom catalog. Matches by file name or path, by
-// checksum, or by date. Results are grouped per file: once a checksum is known, every
+// checksum, by date, or by Lightroom album name. Results are grouped per file: once a checksum is known, every
 // place holding that exact file is listed together, whatever it is called there.
 const fs = require('node:fs');
 const path = require('node:path');
 const { currentPath, online, pathExists, describe } = require('./volumes');
-const { albumsForAsset } = require('./lrcatalog');
+const { albumPaths } = require('./lrcatalog');
 const { localDate } = require('./util');
 
 const MAX_ROWS = 2000; // per source, before grouping
@@ -17,7 +17,15 @@ function lookup(db, query, opts = {}) {
   const limit = opts.limit || 300;
   const isSha = /^[0-9a-f]{8,64}$/i.test(q);
   const isDate = /^\d{4}(-\d{2}(-\d{2})?)?$/.test(q);
-  const like = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+  const esc = (t) => t.replace(/[\\%_]/g, (c) => `\\${c}`);
+  const like = `%${esc(q)}%`;
+  // Paths: Windows writes them with backslashes, and the library index keeps them without
+  // the drive letter (drives can change letter), so a pasted "J:/Projects/x" is also
+  // looked for as "\Projects\x".
+  const slashed = q.replace(/\//g, '\\');
+  const pathLike = `%${esc(slashed)}%`;
+  const relLike = `%${esc(slashed.replace(/^[a-z]:(?=\\)/i, ''))}%`;
+  const onCardLike = `%${esc(slashed.replace(/^([a-z]:)?\\+/i, ''))}%`; // card paths have no leading slash
   const shaLike = `${q.toLowerCase()}%`;
   let truncated = false;
   const all = (sql, ...args) => {
@@ -34,15 +42,15 @@ function lookup(db, query, opts = {}) {
   // ---- matches from each source ----
   const cardRows = all(
     `SELECT f.*, c.serial, COALESCE(NULLIF(c.nickname, ''), c.label) AS card FROM files f JOIN cards c ON c.id = f.card_id
-     WHERE f.name LIKE ? ESCAPE '\\' OR f.rel_path LIKE ? ESCAPE '\\' OR f.shoot LIKE ? ESCAPE '\\'
+     WHERE f.name LIKE ? ESCAPE '\\' OR f.rel_path LIKE ? ESCAPE '\\' OR f.rel_path LIKE ? ESCAPE '\\' OR f.shoot LIKE ? ESCAPE '\\'
         ${isSha ? 'OR f.sha256 LIKE ?' : ''} ${isDate ? 'OR f.capture_date LIKE ?' : ''}`,
-    like, like, like, ...(isSha ? [shaLike] : []), ...(isDate ? [`${q}%`] : [])
+    like, like, onCardLike, like, ...(isSha ? [shaLike] : []), ...(isDate ? [`${q}%`] : [])
   );
   // Recorded copies (imports, found copies) whose path matches.
   const copyRows = all(
     `SELECT f.*, c.serial, COALESCE(NULLIF(c.nickname, ''), c.label) AS card FROM locations l JOIN files f ON f.id = l.file_id JOIN cards c ON c.id = f.card_id
      WHERE l.kind != 'lightroom' AND l.path LIKE ? ESCAPE '\\'`,
-    like
+    pathLike
   );
   let libRows = [];
   if (hasLib) {
@@ -50,15 +58,17 @@ function lookup(db, query, opts = {}) {
     libRows = all(
       `SELECT * FROM lib_files WHERE rel LIKE ? ESCAPE '\\'
         ${isSha ? 'OR sha256 LIKE ?' : ''} ${dateRange ? 'OR (mtime_ms >= ? AND mtime_ms < ?)' : ''}`,
-      like, ...(isSha ? [shaLike] : []), ...(dateRange || [])
+      relLike, ...(isSha ? [shaLike] : []), ...(dateRange || [])
     );
   }
   const lrRows = hasLr
     ? all(
-        `SELECT * FROM lr_assets WHERE name LIKE ? ESCAPE '\\' ${isSha ? 'OR sha256 LIKE ?' : ''} ${isDate ? 'OR capture_date LIKE ?' : ''}`,
-        like, ...(isSha ? [shaLike] : []), ...(isDate ? [`${q}%`] : [])
+        `SELECT * FROM lr_assets WHERE name LIKE ? ESCAPE '\\' ${isSha ? 'OR sha256 LIKE ?' : ''} ${isDate ? 'OR capture_date LIKE ?' : ''}
+           OR asset_id IN (SELECT aa.asset_id FROM lr_album_assets aa JOIN lr_albums al ON al.album_id = aa.album_id WHERE al.name LIKE ? ESCAPE '\\')`,
+        like, ...(isSha ? [shaLike] : []), ...(isDate ? [`${q}%`] : []), like
       )
     : [];
+  let lrAlbums = null; // album paths, worked out once per search
 
   // ---- group them: one entry per file ----
   const groups = new Map();
@@ -100,7 +110,8 @@ function lookup(db, query, opts = {}) {
     g.date = g.date || a.capture_date;
     let albums = [];
     try {
-      albums = albumsForAsset(db, a.asset_id);
+      lrAlbums = lrAlbums || { ...albumPaths(db), of: db.prepare('SELECT album_id FROM lr_album_assets WHERE asset_id = ?') };
+      albums = lrAlbums.of.all(a.asset_id).map((r) => lrAlbums.pathOf(r.album_id)).filter(Boolean);
     } catch {
       albums = [];
     }

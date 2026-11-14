@@ -1034,13 +1034,13 @@ function drawLookup() {
 function lookupView() {
   const L = state.lookup || (state.lookup = { q: '', res: null });
   const input = h('input', { type: 'search', id: 'lookupq', value: L.q, 'aria-label': 'Find a file',
-    placeholder: 'File name, part of a path, a checksum, or a date like 2026-05-06',
+    placeholder: 'File name, a path, a checksum, a Lightroom album, or a date like 2026-05-06',
     oninput: (e) => { L.q = e.target.value; clearTimeout(L.t); L.t = setTimeout(runLookup, 300); },
     onkeydown: (e) => { if (e.key === 'Enter') { clearTimeout(L.t); runLookup(); } } });
   setTimeout(() => { input.focus(); drawLookup(); }, 0);
   return [
     h('h1', {}, 'Find a file'),
-    h('p', { class: 'lede' }, 'Searches files on your cards, the files in your library folders, and your Lightroom library. Each result shows every place that file is, matched by checksum, whatever it is called there.'),
+    h('p', { class: 'lede' }, 'Searches the files on your cards, every file in the library index, and your Lightroom library. Each result shows every place that file is, matched by checksum, whatever it is called there. You can paste a full path from Explorer.'),
     h('div', { class: 'row lookupbar' }, input),
     h('div', { id: 'lookupres' }),
   ];
