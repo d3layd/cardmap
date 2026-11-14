@@ -4,6 +4,7 @@
 // "what has duplicates?" in one place.
 const path = require('node:path');
 const { ensureSchema } = require('./lrcatalog');
+const { librarySig } = require('./reports');
 
 const SHOW = {
   all: () => true,
@@ -15,11 +16,12 @@ const SHOW = {
   cardonly: (r) => r.cards > 0 && r.local === 0 && !r.lr,
 };
 
-let cache = null; // { at, rows }
+let cache = null; // { sig, rows }
 
-/** Build (or reuse, for up to a minute) the full list. */
+/** Build the full list, or reuse the last one while the library is unchanged. */
 function allRows(db) {
-  if (cache && Date.now() - cache.at < 60000) return cache.rows;
+  const sig = librarySig(db);
+  if (cache && cache.sig === sig) return cache.rows;
   ensureSchema(db);
   const hasLr = true;
   const map = new Map();
@@ -56,7 +58,7 @@ function allRows(db) {
   }
   const letter = new Map(db.prepare('SELECT serial, last_letter FROM volumes').all().map((v) => [v.serial, v.last_letter]));
   const rows = [...map.values()].map((r) => ({ ...r, drives: [...r.vols].map((v) => letter.get(v) || '?').sort().join(' '), vols: undefined }));
-  cache = { at: Date.now(), rows };
+  cache = { sig, rows };
   return rows;
 }
 

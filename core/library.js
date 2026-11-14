@@ -65,7 +65,8 @@ function overview(db, q) {
 
 /**
  * Individual files with every recorded location.
- * q: { cardId, date } | { cardId, folder } (folder on the card) | { dir } (a folder on disk)
+ * q: { cardId, date } | { cardId, folder } (folder on the card) | { cardId } (the whole card) | { dir } (a folder on disk),
+ *    plus lr: 'missing' for only the files not in Lightroom
  */
 function listFiles(db, q) {
   let files;
@@ -81,6 +82,11 @@ function listFiles(db, q) {
     files = db.prepare('SELECT * FROM files WHERE card_id = ?').all(q.cardId);
     const pick = pickFiles({ dates: q.date ? [q.date] : null, folders: q.folder ? [q.folder] : null });
     if (pick) files = files.filter(pick);
+  }
+  // lr: 'missing' keeps only files Lightroom has no record of.
+  if (q.lr === 'missing') {
+    const inLr = db.prepare("SELECT 1 AS x FROM locations WHERE file_id = ? AND kind = 'lightroom'");
+    files = files.filter((f) => !inLr.get(f.id));
   }
   const exists = existsCache();
   const lrAlbums = (assetId) => {

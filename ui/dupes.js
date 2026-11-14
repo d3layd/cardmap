@@ -94,8 +94,17 @@ function dupesView() {
       h('li', {}, h('strong', {}, `Backups to keep: ${T.neededGroups.toLocaleString()} files, ${bytes(T.neededBytes)}. `),
         'One copy on each of two disks (or one disk and Lightroom). Deleting either would leave a single copy.'),
       T.uncheckedGroups ? h('li', {}, h('strong', { class: 'part' }, `Not checked: ${T.uncheckedGroups.toLocaleString()} files. `), 'A copy is on a drive that is not connected, or changed since it was indexed.') : null),
-    h('div', { class: 'hint' }, `Built ${dateTime(Date.parse(r.builtAt))} from the library index. Files not indexed yet are not included.`),
-    h('div', { class: 'row actions' }, h('button', { class: 'btn', disabled: busy(), onclick: rebuild }, 'Rebuild the report')));
+    h('div', { class: 'hint' }, `Built ${dateTime(Date.parse(r.builtAt))} from the library index. Files not indexed yet are not included. `,
+      D.stale ? h('strong', { class: 'part' }, 'The library has changed since; CardMap rebuilds this on its own when nothing else is running.') : 'Saved, and rebuilt on its own when the library changes.'),
+    h('div', { class: 'row actions' }, h('button', { class: 'btn', disabled: busy(), onclick: rebuild }, 'Rebuild the report')),
+    (D.history || []).length > 1 ? h('details', { class: 'rules' },
+      h('summary', {}, `Past reports (${D.history.length})`),
+      h('table', { class: 'grid' },
+        h('thead', {}, h('tr', {}, ['Built', 'Files with copies', 'Extra space', 'Safe to delete', 'Extra on one disk', 'Backups to keep'].map((t) => h('th', {}, t)))),
+        h('tbody', {}, D.history.map((x) => h('tr', {},
+          h('td', {}, dateTime(Date.parse(x.at))), h('td', { class: 'num' }, (x.groups || 0).toLocaleString()),
+          h('td', { class: 'num' }, bytes(x.extraBytes || 0)), h('td', { class: 'num' }, bytes(x.safeBytes || 0)),
+          h('td', { class: 'num' }, bytes(x.oneDiskBytes || 0)), h('td', { class: 'num' }, bytes(x.neededBytes || 0))))))) : null);
 
   const rules = h('details', { class: 'rules', open: state.dupeRulesOpen, ontoggle: (e) => { state.dupeRulesOpen = e.target.open; } },
     h('summary', {}, 'How copies are chosen', h('span', { class: 'none' }, ` keep order ${st.order.map((o) => o.letter).join(' > ')}${st.countLightroom ? ', Lightroom counts' : ''}`)),

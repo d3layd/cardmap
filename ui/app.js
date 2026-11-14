@@ -216,7 +216,9 @@ function resultNotice() {
     const lo = x.leftOut || {};
     if (lo.skip || lo.unready) text += ` Left out: ${[lo.skip ? `${lo.skip} marked skip` : '', lo.unready ? `${lo.unready} not marked ready` : ''].filter(Boolean).join(', ')}.`;
   } else if (r.kind === 'lightroom') {
-    text = `Lightroom check${x.cancelled ? ' cancelled' : ''}: ${x.found} of ${x.checked} files are in the Lightroom library, ${x.notFound} are not.`;
+    const known = x.alreadyFound || 0;
+    text = `Lightroom check${x.cancelled ? ' cancelled' : ''}: ${x.found + known} of ${x.checked + known} files are in the Lightroom library, ${x.notFound} are not.`;
+    if (known) text += ` ${known} of them were already matched on an earlier check${x.found ? `, ${x.found} are new` : ''}.`;
     if (x.notUploaded) text += ` ${x.notUploaded} are in the catalog but their upload is not confirmed.`;
     if (x.unverifiable) text += ` ${x.unverifiable} might be there but need the card inserted to confirm.`;
     text += x.method === 'catalog'
@@ -580,6 +582,9 @@ function cardView() {
         onclick: () => { state.drawer = state.drawer === 'local' ? null : 'local'; renderMain(); } }, 'Find local copies'),
       h('button', { class: 'btn', 'aria-expanded': String(state.drawer === 'lightroom'),
         onclick: () => { state.drawer = state.drawer === 'lightroom' ? null : 'lightroom'; renderMain(); } }, `Add to Lightroom${sel}`),
+      s.totals.lightroom < s.totals.count ? h('button', { class: 'btn', title: 'Every file on this card that Lightroom has no record of', onclick: () =>
+        openFiles({ cardId: s.card.id, lr: 'missing' }, `${title}: not in Lightroom`, 'Files Lightroom has no record of, as of the last Lightroom check.') },
+        `Not in Lightroom (${(s.totals.count - s.totals.lightroom).toLocaleString()})`) : null,
       h('button', { class: 'btn', 'aria-expanded': String(state.drawer === 'log'),
         onclick: () => { state.drawer = state.drawer === 'log' ? null : 'log'; renderMain(); } }, 'Log'),
       s.mounted ? h('button', { class: `btn primary`, 'aria-expanded': String(state.drawer === 'import'),
@@ -597,7 +602,10 @@ function cardView() {
       { label: 'Files', num: true, value: (g) => g.count, cell: (g) => g.count },
       { label: 'Size', num: true, value: (g) => g.bytes, cell: (g) => bytes(g.bytes) },
       { label: 'Copied', num: true, value: (g) => g.copied, text: (g) => `${g.copied} of ${g.count}`, cell: (g) => tally(g.copied, g.count) },
-      { label: 'In Lightroom', num: true, value: (g) => g.lightroom, text: (g) => `${g.lightroom} of ${g.count}`, cell: (g) => tally(g.lightroom, g.count) },
+      { label: 'In Lightroom', num: true, value: (g) => g.lightroom, text: (g) => `${g.lightroom} of ${g.count}`, cell: (g) => [tally(g.lightroom, g.count),
+        g.lightroom < g.count ? h('div', {}, h('button', { class: 'link', title: 'See the files Lightroom does not have', onclick: () =>
+          openFiles({ cardId: s.card.id, ...(byDate ? { date: g.key } : { folder: g.key }), lr: 'missing' }, `${g.key}: not in Lightroom`, `${title}. Files Lightroom has no record of, as of the last Lightroom check.`) },
+          `see ${g.count - g.lightroom}`)) : null] },
       { label: '2+ verified copies', num: true, value: (g) => g.safe, text: (g) => `${g.safe} of ${g.count}`, cell: (g) => tally(g.safe, g.count) },
       { label: 'Marked', value: (g) => g.ready * 1e6 + g.skip, text: (g) => markText(g), cell: (g) => (g.ready || g.skip ? markText(g) : h('span', { class: 'none' }, '')) },
     ], rows, { name: `${cardName(s.card)} by ${unit}` }),
@@ -606,6 +614,12 @@ function cardView() {
     : state.drawer === 'lightroom' ? lightroomPanel(s, rows, keys, unit)
     : state.drawer === 'local' ? localPanel(s) : null)];
 }
+
+// Whether Lightroom has a card file: Yes, Not confirmed (in the catalog, upload not confirmed) or No.
+const lrState = (r) => {
+  const l = r.locations.filter((x) => x.kind === 'lightroom');
+  return !l.length ? 'No' : l.some((x) => x.verified) ? 'Yes' : 'Not confirmed';
+};
 
 function filesView() {
   const f = state.files;
@@ -645,6 +659,7 @@ function filesView() {
       { label: 'File', value: (r) => r.name, text: (r) => [r.name, r.shoot].filter(Boolean).join(' · '), cell: (r) => [r.name, r.shoot ? h('div', { class: 'none' }, r.shoot) : null,
         r.openPath ? h('div', {}, h('button', { class: 'link', onclick: () => openFile(r.openPath) }, 'Open')) : null] },
       { label: 'Card folder', cell: (r) => r.folder },
+      ...(cardId ? [{ label: 'Lightroom', value: (r) => lrState(r), cell: (r) => h('span', { class: lrState(r) === 'Yes' ? 'ok' : lrState(r) === 'No' ? 'none' : 'part' }, lrState(r)) }] : []),
       { label: 'Size', num: true, value: (r) => r.size, text: (r) => r.size, cell: (r) => bytes(r.size) },
       { label: 'Taken', cls: 'date', value: (r) => r.mtime, text: (r) => dateTime(r.mtime), cell: (r) => dateTime(r.mtime) },
       { label: 'Checksum', value: (r) => r.sha256 || '', cell: (r) => (r.sha256 ? h('code', { title: `SHA-256: ${r.sha256}` }, r.sha256.slice(0, 12)) : h('span', { class: 'none' }, 'Not read yet')) },
@@ -1213,6 +1228,7 @@ api.on('drives', async ({ newDrives }) => {
 });
 
 // The watcher picked up file changes on an indexed drive.
+api.on('reports', () => { if (state.view === 'dupes') loadDupes(false); });
 api.on('libchanged', async (c) => {
   if (state.view !== 'index') return;
   const bits = [c.added && `${c.added} added`, c.changed && `${c.changed} changed`, c.removed && `${c.removed} removed`].filter(Boolean).join(', ');

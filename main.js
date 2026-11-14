@@ -60,6 +60,7 @@ function dailyBackup() {
 }
 const { listDrives, physicalDrives } = require('./core/drives');
 const { buildReport, recheck } = require('./core/dupes');
+const { librarySig, saveReport, loadReport, snapshot, snapshots } = require('./core/reports');
 const { setVolumes, syncDb, pin, currentPath, online, pathExists } = require('./core/volumes');
 const { scanCard, cardSummary } = require('./core/cards');
 const { runImport } = require('./core/importer');
@@ -88,6 +89,7 @@ let nextRun = null; // { hashOnly, reason }: run again once the current run fini
 let volumesLatest = []; // as of the last poll, with free space
 let userPaused = false; // Pause pressed: no automatic runs until Start is pressed again
 let scheduleIndex = () => {};
+let autoReports = () => {};
 let refreshWatch = () => {};
 let startIndexing = () => {};
 // Set up in registerIpc: what to do when drives or cards come and go.
@@ -476,6 +478,7 @@ function registerIpc() {
         // Finished everything it could reach: nothing to resume next launch.
         if (out.result && !out.result.cancelled && !out.result.scanOnly) setSettings(db, { libIndexAuto: '' });
         send('bg', { done: true, ...out });
+        if (out.result && !out.result.cancelled && !out.result.scanOnly) setTimeout(() => autoReports(), 10000);
       });
   };
   ipcMain.handle('index:start', () => {
@@ -609,7 +612,7 @@ function registerIpc() {
     startJob('lrpair', (j, emit) => pairExport(db, { folder, dest: archiveDir(), sidecars: Boolean(sidecars) }, j, emit)));
 
   // ----- Duplicates and the safe-to-delete list -----
-  let dupeReport = null;
+  let dupeReport = (loadReport(db, 'dupes') || {}).report || null;
   // Drives holding indexed files, in the order they keep their copies. The default puts
   // the drive with the most indexed data first.
   const dupeSettings = () => {
@@ -632,7 +635,21 @@ function registerIpc() {
       }),
     };
   };
-  ipcMain.handle('dupes:get', () => ({ report: dupeReport, settings: dupeSettings() }));
+  // What the report depends on: the library and the keep settings.
+  const dupeSig = () => {
+    const st = dupeSettings();
+    return librarySig(db, JSON.stringify([st.order.map((o) => o.serial), st.countLightroom]));
+  };
+  const saveDupes = (report) => {
+    dupeReport = report;
+    const T = report.totals;
+    saveReport(db, 'dupes', dupeSig(), report, { groups: T.groups, extraBytes: T.extraBytes, safeFiles: T.safeFiles, safeBytes: T.safeBytes, oneDiskBytes: T.oneDiskBytes, neededBytes: T.neededBytes });
+  };
+  ipcMain.handle('dupes:get', () => {
+    const saved = loadReport(db, 'dupes');
+    return { report: dupeReport, settings: dupeSettings(), stale: Boolean(dupeReport && saved && saved.sig !== dupeSig()), history: snapshots(db, 'dupes') };
+  });
+  ipcMain.handle('reports:history', (_e, kind) => snapshots(db, kind));
   ipcMain.handle('dupes:settings', (_e, { order, countLightroom }) => {
     const set = {};
     if (order) set.dupOrder = JSON.stringify(order);
@@ -645,7 +662,7 @@ function registerIpc() {
     const phys = await physicalDrives();
     const st = dupeSettings();
     const priority = Object.fromEntries(st.order.map((o, i) => [o.serial, i]));
-    dupeReport = await buildReport(db, phys, { priority, countLightroom: st.countLightroom }, j, emit);
+    saveDupes(await buildReport(db, phys, { priority, countLightroom: st.countLightroom }, j, emit));
     return dupeReport.totals;
   }));
   ipcMain.handle('dupes:recheck', (_e, shas) => startJob('recheck', (j, emit) => recheck(db, shas || [], j, emit)));
@@ -656,6 +673,28 @@ function registerIpc() {
   ipcMain.handle('lrcache:refresh', (_e, rebuild) =>
     startJob('lrcache', (j, emit) => refreshIndex(db, findCatalogs(''), j, emit, { rebuild: Boolean(rebuild) }))
   );
+
+  // Rebuild saved reports on their own once the library has changed, only while nothing
+  // else is running, and at most every 30 minutes. Stops (and tries again later) as soon
+  // as another task starts.
+  let lastAuto = 0;
+  autoReports = async () => {
+    if (job || bg || Date.now() - lastAuto < 30 * 60 * 1000) return;
+    const hashed = db.prepare('SELECT count(sha256) AS n FROM lib_files').get();
+    if (!hashed || !hashed.n) return;
+    lastAuto = Date.now();
+    try {
+      snapshot(db, 'filemap', fileMap(db, { limit: 0 }).totals);
+      if (dupeReport && loadReport(db, 'dupes').sig === dupeSig()) return;
+      const st = dupeSettings();
+      const priority = Object.fromEntries(st.order.map((o, i) => [o.serial, i]));
+      const j = { get cancelled() { return Boolean(job || bg); } };
+      saveDupes(await buildReport(db, await physicalDrives(), { priority, countLightroom: st.countLightroom }, j, null));
+      send('reports', { kind: 'dupes' });
+    } catch {
+      lastAuto = 0; // interrupted: try again next time
+    }
+  };
 
   ipcMain.handle('job:cancel', () => {
     if (job) job.cancelled = true;
@@ -864,6 +903,8 @@ app.whenReady().then(() => {
       refreshWatch();
     }, 9000);
     setInterval(() => scheduleIndex('timer'), 6 * 60 * 60 * 1000);
+    setTimeout(() => autoReports(), 60000);
+    setInterval(() => autoReports(), 30 * 60 * 1000);
   }
 });
 

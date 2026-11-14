@@ -82,13 +82,15 @@ async function runLightroomCheck(db, opts, job, emit) {
 
   let files = db
     .prepare(
-      `SELECT f.* FROM files f WHERE f.card_id = ?
-       AND NOT EXISTS (SELECT 1 FROM locations l WHERE l.file_id = f.id AND l.kind = 'lightroom' AND l.verified = 1)
-       ORDER BY f.capture_date, f.rel_path`
+      `SELECT f.*, EXISTS (SELECT 1 FROM locations l WHERE l.file_id = f.id AND l.kind = 'lightroom' AND l.verified = 1) AS known
+       FROM files f WHERE f.card_id = ? ORDER BY f.capture_date, f.rel_path`
     )
     .all(opts.cardId);
   const pick = pickFiles(opts);
   if (pick) files = files.filter(pick);
+  // Files already matched on an earlier check are not read again, but still count as found.
+  result.alreadyFound = files.filter((f) => f.known).length;
+  files = files.filter((f) => !f.known);
   if (opts.maxFiles) files = files.slice(0, opts.maxFiles);
 
   const bySize = catalogs.length ? db.prepare('SELECT * FROM lr_assets WHERE size = ?') : null;
