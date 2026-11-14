@@ -126,6 +126,8 @@ async function loadMap() {
 /** Open the list of individual files for a date, a card folder, or a folder on disk. */
 async function openFiles(query, title, sub) {
   state.files = { query, title, sub, back: state.view === 'files' ? state.files.back : state.view, rows: null };
+  state.fileSel = new Set();
+  state.fileSelLast = null;
   state.view = 'files';
   state.lastResult = null;
   render();
@@ -569,6 +571,7 @@ function cardView() {
       h('span', { id: 'cardbgline' }, cardBgLine(state.cardBg[s.card.serial])),
       h('button', { class: 'link', title: 'Stop reading, for example to take the card out', onclick: () => api.invoke('cardbg:stop', s.card.serial) }, 'Stop')) : null,
     s.mounted ? null : h('div', { class: 'notice' }, 'This card is not connected. The table shows what was recorded when it was last read.'),
+    reviewPrompt(s, title),
     h('div', { class: 'row toolbar' },
       h('span', { class: 'none' }, 'Group by'),
       h('div', { class: 'seg', role: 'group', 'aria-label': 'Group files by' },
@@ -615,6 +618,24 @@ function cardView() {
     : state.drawer === 'local' ? localPanel(s) : null)];
 }
 
+// Files only on the card (not copied anywhere, not in Lightroom) that have not been marked
+// Ready or Skip yet: ask for them to be reviewed.
+function reviewPrompt(s, title) {
+  const t = s.totals;
+  if (!t.unsaved) return null;
+  const open = () => openFiles({ cardId: s.card.id, unsaved: true }, `${title}: only on the card`,
+    'Not copied to any drive and not in Lightroom. Mark each Ready to import it, or Skip to leave it out.');
+  const n = (k) => `${k.toLocaleString()} file${k === 1 ? '' : 's'}`;
+  if (!t.unreviewed) {
+    return h('div', { class: 'hint row' }, `${n(t.unsaved)} only on this card, all marked Ready or Skip. `,
+      h('button', { class: 'link', onclick: open }, 'See them'));
+  }
+  return h('div', { class: 'notice warn row' },
+    h('span', { class: 'grow' }, h('strong', {}, `${n(t.unreviewed)} on this card ${t.unreviewed === 1 ? 'is' : 'are'} not saved anywhere yet`),
+      ' (not copied to your drives and not in Lightroom) and not reviewed. Mark each one Ready to import it, or Skip to leave it out.'),
+    h('button', { class: 'btn primary', onclick: open }, `Review ${n(t.unreviewed)}`));
+}
+
 // Whether Lightroom has a card file: Yes, Not confirmed (in the catalog, upload not confirmed) or No.
 const lrState = (r) => {
   const l = r.locations.filter((x) => x.kind === 'lightroom');
@@ -641,19 +662,51 @@ function filesView() {
     cell: (r) => h('div', { class: 'seg', role: 'group', 'aria-label': `Mark ${r.name}` }, markBtn(r, 'ready', 'Ready'), markBtn(r, 'skip', 'Skip')) }] : [];
   const ready = rows ? rows.filter((r) => r.mark === 'ready').length : 0;
   const skip = rows ? rows.filter((r) => r.mark === 'skip').length : 0;
+
+  // Bulk selection: tick files (Shift-click ticks a range), then mark them all at once.
+  const sel = state.fileSel || (state.fileSel = new Set());
+  const shown = () => gridVisible('files', rows);
+  const tick = (r, on, shift) => {
+    const order = shown();
+    const i = order.indexOf(r);
+    const j = shift && state.fileSelLast != null ? order.findIndex((x) => x.id === state.fileSelLast) : -1;
+    const range = j >= 0 && i >= 0 ? order.slice(Math.min(i, j), Math.max(i, j) + 1) : [r];
+    for (const x of range) { if (on) sel.add(x.id); else sel.delete(x.id); }
+    state.fileSelLast = r.id;
+    renderMain();
+  };
+  const selectWhere = (test) => { sel.clear(); for (const r of shown()) if (test(r)) sel.add(r.id); renderMain(); };
+  const chosen = rows ? rows.filter((r) => sel.has(r.id)) : [];
+  const markChosen = async (mark) => { await setMark(mark ? chosen : chosen.filter((r) => r.mark), mark); sel.clear(); renderMain(); };
+  const allTicked = rows && rows.length > 0 && shown().every((r) => sel.has(r.id));
+  const selCol = cardId ? [{ label: h('input', { type: 'checkbox', checked: allTicked, 'aria-label': 'Select all files shown',
+      onchange: (e) => selectWhere(() => e.target.checked) }),
+    sort: false, csv: false, cls: 'check',
+    cell: (r) => h('input', { type: 'checkbox', checked: sel.has(r.id), 'aria-label': `Select ${r.name}`,
+      onclick: (e) => tick(r, e.target.checked, e.shiftKey) }) }] : [];
+  // From a review list, go straight on to importing what was marked Ready.
+  const sum = state.summary;
+  const canImport = cardId && ready && sum && sum.mounted && sum.card.id === cardId;
+  const toImport = () => { state.view = 'card'; state.sel.clear(); state.form.onlyReady = true; state.drawer = 'import'; render(); };
+
   return [
     h('div', { class: 'row' },
       h('button', { class: 'btn', onclick: async () => { state.view = f.back; if (f.back === 'map') await loadMap(); render(); } }, 'Back'),
       h('h1', {}, f.title)),
     h('p', { class: 'lede' }, rows ? `${rows.length} file${rows.length === 1 ? '' : 's'}, ${bytes(total)}. ${f.sub || ''}` : 'Loading'),
     rows && cardId ? h('div', { class: 'row toolbar' },
-      h('span', { class: 'none' }, ready || skip ? `${markText({ ready, skip })}. ` : 'Mark files Ready to import only those, or Skip to leave them out.'),
+      h('span', { class: 'none' }, 'Select'),
+      h('button', { class: 'btn', onclick: () => selectWhere(() => true) }, 'All shown'),
+      h('button', { class: 'btn', onclick: () => selectWhere((r) => !r.mark) }, 'Not marked'),
+      h('button', { class: 'btn', disabled: !sel.size, onclick: () => { sel.clear(); renderMain(); } }, 'None'),
       h('span', { class: 'spacer' }),
-      h('span', { class: 'none' }, 'All shown:'),
-      h('button', { class: 'btn', onclick: () => setMark(gridVisible('files', rows), 'ready') }, 'Ready'),
-      h('button', { class: 'btn', onclick: () => setMark(gridVisible('files', rows), 'skip') }, 'Skip'),
-      h('button', { class: 'btn', onclick: () => setMark(gridVisible('files', rows).filter((r) => r.mark), null) }, 'Clear')) : null,
+      h('span', { class: 'none' }, chosen.length ? `Mark ${chosen.length} selected:` : ready || skip ? `${markText({ ready, skip })}.` : 'Tick files (Shift-click for a range), then mark them.'),
+      h('button', { class: 'btn', disabled: !chosen.length, onclick: () => markChosen('ready') }, 'Ready'),
+      h('button', { class: 'btn', disabled: !chosen.length, onclick: () => markChosen('skip') }, 'Skip'),
+      h('button', { class: 'btn', disabled: !chosen.length, onclick: () => markChosen(null) }, 'Clear'),
+      canImport ? h('button', { class: 'btn primary', onclick: toImport }, `Import the ${ready} marked Ready`) : null) : null,
     rows && grid('files', [
+      ...selCol,
       ...markCol,
       { label: 'Preview', sort: false, csv: false, cls: 'thumbcell', cell: (r) => thumb(r) },
       { label: 'File', value: (r) => r.name, text: (r) => [r.name, r.shoot].filter(Boolean).join(' · '), cell: (r) => [r.name, r.shoot ? h('div', { class: 'none' }, r.shoot) : null,

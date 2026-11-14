@@ -66,7 +66,7 @@ function overview(db, q) {
 /**
  * Individual files with every recorded location.
  * q: { cardId, date } | { cardId, folder } (folder on the card) | { cardId } (the whole card) | { dir } (a folder on disk),
- *    plus lr: 'missing' for only the files not in Lightroom
+ *    plus lr: 'missing' for only the files not in Lightroom, unsaved: true for files only on the card
  */
 function listFiles(db, q) {
   let files;
@@ -83,11 +83,6 @@ function listFiles(db, q) {
     const pick = pickFiles({ dates: q.date ? [q.date] : null, folders: q.folder ? [q.folder] : null });
     if (pick) files = files.filter(pick);
   }
-  // lr: 'missing' keeps only files Lightroom has no record of.
-  if (q.lr === 'missing') {
-    const inLr = db.prepare("SELECT 1 AS x FROM locations WHERE file_id = ? AND kind = 'lightroom'");
-    files = files.filter((f) => !inLr.get(f.id));
-  }
   const exists = existsCache();
   const lrAlbums = (assetId) => {
     try {
@@ -97,7 +92,7 @@ function listFiles(db, q) {
     }
   };
   const locs = db.prepare('SELECT kind, path, vol, verified, verified_at FROM locations WHERE file_id = ? ORDER BY kind, path');
-  return files
+  const out = files
     .sort((a, b) => (a.rel_path < b.rel_path ? -1 : 1))
     .map((f) => ({
       id: f.id, name: f.name, relPath: f.rel_path, folder: cardFolder(f.rel_path), size: f.size, mtime: f.mtime_ms,
@@ -112,6 +107,12 @@ function listFiles(db, q) {
         albums: l.path.startsWith('lightroom:') ? lrAlbums(l.path.slice('lightroom:'.length)) : undefined,
       })),
     }));
+  // The same rule as the card summary: a copy counts when it is verified and still there.
+  const held = (r, lrOnly) => r.locations.some((l) => l.verified && l.exists && (!lrOnly || l.kind === 'lightroom'));
+  // unsaved: only on the card (no copy anywhere, not in Lightroom). lr 'missing': not in Lightroom.
+  if (q.unsaved) return out.filter((r) => !held(r, false));
+  if (q.lr === 'missing') return out.filter((r) => !held(r, true));
+  return out;
 }
 
 module.exports = { overview, listFiles };

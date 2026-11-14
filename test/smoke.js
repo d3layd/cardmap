@@ -38,6 +38,10 @@ const { inventory, hashPending, matchCards, indexStatus } = require('../core/lib
   console.log('folders:', s.folders.map((g) => `${g.key}(${g.count})`).join(' '));
   assert.strictEqual(s.folders.reduce((n, g) => n + g.count, 0), s.totals.count);
   assert(s.totals.count > 0 && s.totals.copied === 0 && !s.safeToFormat);
+  // Nothing copied yet: every file is only on the card and unreviewed.
+  assert.strictEqual(s.totals.unsaved, s.totals.count);
+  assert.strictEqual(s.totals.unreviewed, s.totals.count);
+  assert.strictEqual(listFiles(db, { cardId, unsaved: true }).length, s.totals.count);
 
   // Scanning twice must not duplicate rows.
   const again = await scanCard(db, drive, job);
@@ -210,6 +214,10 @@ const { inventory, hashPending, matchCards, indexStatus } = require('../core/lib
     const sm = cardSummary(db, cardId, presentIds);
     assert.strictEqual(sm.totals.ready, 1);
     assert.strictEqual(sm.totals.skip, 1);
+    // The only-on-card list matches the summary's count.
+    const onlyOnCard = listFiles(db, { cardId, unsaved: true }).length;
+    assert.strictEqual(onlyOnCard, cardSummary(db, cardId, presentIds).totals.unsaved);
+    assert(sm.totals.unreviewed <= sm.totals.unsaved);
     const log = cardLog(db, cardId);
     assert.deepStrictEqual(log.slice(0, 3).map((l) => l.action), ['import', 'ready', 'skip']); // earlier imports are logged too
     setMarks(db, cardId, [a.id, b.id], null);

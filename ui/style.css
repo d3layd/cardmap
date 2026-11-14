@@ -181,6 +181,7 @@ tr.clickable:hover td { background: var(--panel); }
 
 .notice { border-left: 3px solid var(--accent); background: var(--panel); padding: 9px 12px; border-radius: 0 6px 6px 0; margin-bottom: 16px; }
 .notice.bad { border-color: var(--bad); }
+.notice.warn { border-color: var(--warn); }
 .notice ul { margin: 6px 0 0; padding-left: 18px; }
 
 /* Job bar */
