@@ -5,9 +5,9 @@ const INVOKE = new Set([
   'job:cancel', 'map', 'files', 'card:rename', 'thumb', 'open', 'lightroom:pending', 'lightroom:open',
   'library:folders', 'library:setFolders', 'index:status', 'index:inventory', 'index:start', 'index:stop',
   'index:scan', 'index:setDrives', 'index:exclude', 'index:include',
-  'index:rules', 'index:addPrefix', 'index:removePrefix', 'index:togglePrefix', 'lookup', 'export:csv', 'dupes:get', 'dupes:settings', 'dupes:build', 'dupes:recheck', 'lrcache:status', 'lrcache:albums', 'lrcache:refresh', 'settings:get', 'settings:set', 'cardbg:status', 'cardbg:stop', 'index:newDrives', 'index:dismissDrive', 'index:addDrive', 'filemap', 'lredits:status', 'lredits:setDest', 'lredits:export', 'lredits:pair', 'pickFolder', 'reveal',
+  'index:rules', 'index:addPrefix', 'index:removePrefix', 'index:togglePrefix', 'lookup', 'export:csv', 'dupes:get', 'dupes:settings', 'dupes:build', 'dupes:recheck', 'lrcache:status', 'lrcache:albums', 'lrcache:refresh', 'settings:get', 'settings:set', 'cardbg:status', 'cardbg:stop', 'index:newDrives', 'index:dismissDrive', 'index:addDrive', 'filemap', 'history', 'index:watching', 'lredits:status', 'lredits:setDest', 'lredits:export', 'lredits:pair', 'pickFolder', 'reveal',
 ]);
-const EVENTS = new Set(['cards', 'job', 'volumes', 'bg', 'cardbg', 'drives']);
+const EVENTS = new Set(['cards', 'job', 'volumes', 'bg', 'cardbg', 'drives', 'libchanged']);
 
 contextBridge.exposeInMainWorld('cardmap', {
   invoke: (channel, ...args) => {

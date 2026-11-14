@@ -37,6 +37,10 @@ function ensure(db) {
   if (!db.prepare('PRAGMA table_info(lib_files)').all().some((c) => c.name === 'src')) {
     db.exec("ALTER TABLE lib_files ADD COLUMN src TEXT NOT NULL DEFAULT 'folder'; ALTER TABLE lib_files ADD COLUMN kind TEXT;");
   }
+  // When the file first went into the index (for "added since" in the drive history).
+  if (!db.prepare('PRAGMA table_info(lib_files)').all().some((c) => c.name === 'added_at')) {
+    db.exec('ALTER TABLE lib_files ADD COLUMN added_at TEXT');
+  }
   // When the checksum was last read from the file itself.
   if (!db.prepare('PRAGMA table_info(lib_files)').all().some((c) => c.name === 'hashed_at')) {
     db.exec('ALTER TABLE lib_files ADD COLUMN hashed_at TEXT');
@@ -46,7 +50,7 @@ function ensure(db) {
 /** Returns save(batch): adds new files, keeps checksums of unchanged ones, re-queues changed ones. */
 function recorder(db, stamp, src, res) {
   const get = db.prepare('SELECT id, size, mtime_ms FROM lib_files WHERE vol = ? AND rel = ?');
-  const ins = db.prepare('INSERT INTO lib_files (vol, rel, size, mtime_ms, seen, src, kind) VALUES (?, ?, ?, ?, ?, ?, ?)');
+  const ins = db.prepare("INSERT INTO lib_files (vol, rel, size, mtime_ms, seen, src, kind, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))");
   // A file in a folder the user added stays "folder" even if a scan also finds it.
   const touch = db.prepare("UPDATE lib_files SET seen = ?, src = CASE WHEN ? = 'folder' THEN 'folder' ELSE src END, kind = COALESCE(?, kind) WHERE id = ?");
   const reset = db.prepare(
@@ -537,6 +541,95 @@ async function hashCard(db, opts, job, emit) {
   return res;
 }
 
+
+/**
+ * Apply changes the file watcher saw, without listing whole drives again.
+ * changes: { files: [full paths], folders: [full paths] }   (folders: renamed, moved or deleted)
+ * ruleFor(path) -> { src: 'scan' | 'folder', keep(path, size) -> kind or null } or null if not indexed.
+ * Returns { added, changed, removed, byVol: { [vol]: { added, removed } } }.
+ */
+async function applyChanges(db, changes, ruleFor) {
+  ensure(db);
+  const stamp = new Date().toISOString();
+  const res = { added: 0, changed: 0, removed: 0, byVol: {} };
+  const tally = (vol, k, n = 1) => {
+    const v = res.byVol[vol] || (res.byVol[vol] = { added: 0, removed: 0 });
+    v[k] += n;
+  };
+  const get = db.prepare('SELECT id FROM lib_files WHERE vol = ? AND rel = ?');
+  const del = db.prepare('DELETE FROM lib_files WHERE id = ?');
+  const note = (full, st, rule) => {
+    const key = keyOf(full);
+    const kind = rule.keep(full, st.size);
+    if (kind) {
+      const r = { added: 0, changed: 0 };
+      recorder(db, stamp, rule.src, r)([{ ...key, size: st.size, mtime: Math.round(st.mtimeMs), kind: kind === true ? null : kind }]);
+      res.added += r.added;
+      res.changed += r.changed;
+      if (r.added) tally(key.vol, 'added');
+    } else {
+      const row = get.get(key.vol, key.rel);
+      if (row) {
+        del.run(row.id);
+        res.removed += 1;
+        tally(key.vol, 'removed');
+      }
+    }
+  };
+  // Rows under a folder whose files are gone (the folder was deleted, moved or renamed).
+  const dropGone = (folder) => {
+    const k = keyOf(folder);
+    const prefix = k.rel.endsWith('\\') ? k.rel : `${k.rel}\\`;
+    if (!fs.existsSync(path.parse(folder).root)) return; // the drive went away: keep everything
+    for (const r of db.prepare('SELECT id, vol, rel FROM lib_files WHERE vol = ? AND substr(rel, 1, ?) = ?').all(k.vol, prefix.length, prefix)) {
+      const p = pathOf(r);
+      if (p && !fs.existsSync(p)) {
+        del.run(r.id);
+        res.removed += 1;
+        tally(k.vol, 'removed');
+      }
+    }
+  };
+
+  for (const full of new Set(changes.files || [])) {
+    const rule = ruleFor(full);
+    if (!rule) continue;
+    let st = null;
+    try {
+      st = fs.statSync(full);
+    } catch {
+      st = null;
+    }
+    if (st && st.isFile()) note(full, st, rule);
+    else if (!st && fs.existsSync(path.parse(full).root)) {
+      const key = keyOf(full);
+      const row = get.get(key.vol, key.rel);
+      if (row) {
+        del.run(row.id);
+        res.removed += 1;
+        tally(key.vol, 'removed');
+      }
+    }
+  }
+  for (const folder of new Set(changes.folders || [])) {
+    const rule = ruleFor(folder);
+    if (!rule) continue;
+    dropGone(folder);
+    if (!fs.existsSync(folder)) continue;
+    // A folder moved or renamed into place: list what is in it now.
+    const walk = rule.src === 'folder' ? walkMedia(folder) : walkCamera(folder, { prefixes: learnPrefixes(db), excluded: [] });
+    for await (const f of walk) {
+      const full = typeof f === 'string' ? f : f.full;
+      try {
+        note(full, fs.statSync(full), rule);
+      } catch {
+        /* gone again */
+      }
+    }
+  }
+  return res;
+}
+
 /** Totals for the index, and for each library folder. folders: [{ path, exists }] */
 function indexStatus(db, folders) {
   ensure(db);
@@ -589,4 +682,4 @@ async function runFolderScan(db, opts, job, emit) {
   return { scanned: inv.files, indexed, ...m, skippedFolders: inv.skippedFolders };
 }
 
-module.exports = { inventory, discover, foundFolders, foundPrefixes, dropScanned, dropWholeDrive, matchCards, hashPending, hashCard, indexStatus, runFolderScan };
+module.exports = { inventory, discover, foundFolders, foundPrefixes, dropScanned, dropWholeDrive, matchCards, hashPending, hashCard, applyChanges, indexStatus, runFolderScan };

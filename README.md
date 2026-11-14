@@ -14,8 +14,9 @@ A little tool I'm building to help with managing media: keeping track of my file
 - **Shows duplicates** across your drives, and lists extra copies that are safe to delete: each file must stay in at least two places on different physical disks, and copies next to a video project are kept. It never deletes anything itself.
 - **All files, once each.** One list of every unique file across your drives, cards and Lightroom: how many copies, on which drives, and whether Lightroom has it. Shows what is only in Lightroom, what is not in Lightroom, and what has duplicates.
 - **Archives Lightroom edits.** Saves Lightroom's edit settings as `.xmp` files, plus a JSON record of every photo (checksum, albums, rating, local copies), and can put each `.xmp` next to the matching raw file so Lightroom Classic, Camera Raw and Bridge open it with its edits. Lightroom only keeps some edits on your computer; for the rest, export from Lightroom with "Original + Settings" and CardMap pairs that export with the raws you already have. Existing `.xmp` files are never overwritten.
+- **Drive history.** Records each indexed drive over time: when it was scanned or changed, how many files it held, what was added or removed, and how full it was.
 - **Every table sorts, filters and exports to CSV.**
-- **Keeps itself up to date.** Checksums are read from a card in the background as soon as it is plugged in, and the library index refreshes itself when a drive is connected and every few hours. New drives are offered, not scanned without asking.
+- **Keeps itself up to date.** Checksums are read from a card in the background as soon as it is plugged in, and the library index refreshes itself when a drive is connected and every few hours. While CardMap is open it also watches the indexed drives and folders, so new, moved and deleted files are picked up within seconds. New drives are offered, not scanned without asking.
 
 ## Running it
 

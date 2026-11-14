@@ -31,7 +31,7 @@ function queryDisks() {
 function volumesFrom(disks) {
   return disks
     .filter((d) => d.DeviceID && d.VolumeSerialNumber)
-    .map((d) => ({ letter: d.DeviceID, serial: d.VolumeSerialNumber, label: d.VolumeName || '' }));
+    .map((d) => ({ letter: d.DeviceID, serial: d.VolumeSerialNumber, label: d.VolumeName || '', size: Number(d.Size || 0), free: Number(d.FreeSpace || 0) }));
 }
 
 /** One query for both: { cards, volumes }. */

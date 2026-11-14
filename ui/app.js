@@ -669,7 +669,7 @@ function autoToggle(key, text) {
 }
 
 async function loadIndex() {
-  [state.index, state.rules] = await Promise.all([api.invoke('index:status'), api.invoke('index:rules')]);
+  [state.index, state.rules, state.history, state.watching] = await Promise.all([api.invoke('index:status'), api.invoke('index:rules'), api.invoke('history'), api.invoke('index:watching')]);
   state.libFolders = state.index.folders.map((f) => ({ path: f.path, exists: f.exists }));
   if (state.view === 'index') renderMain();
 }
@@ -782,6 +782,9 @@ function indexView() {
       ix.files ? h('div', { class: 'usage wide' }, h('progress', { max: ix.bytes || 1, value: ix.hashedBytes, 'aria-label': `${pct}% indexed` })) : null,
       ix.duplicateGroups ? h('div', { class: 'hint' }, `Among indexed files, ${ix.duplicateGroups.toLocaleString()} exist in more than one place. The extra copies take ${bytes(ix.duplicateBytes)}.`) : null,
       h('div', { class: 'hint', id: 'bgline' }, ix.running ? bgLine(state.bg || ix.progress) : ''),
+      state.watching && state.watching.length
+        ? h('div', { class: 'hint' }, `Watching ${state.watching.join(', ')} for new, changed, moved and deleted files. Changes are picked up a few seconds after they stop.`)
+        : null,
       h('div', { class: 'row actions' },
         ix.running
           ? h('button', { class: 'btn primary', onclick: async () => { await api.invoke('index:stop'); } }, 'Pause')
@@ -847,6 +850,46 @@ function indexView() {
             h('td', {}, f.files ? pctOf(f) : h('span', { class: 'none' }, 'Not listed yet')),
             h('td', {}, h('button', { class: 'link', 'aria-label': `Remove ${f.path}`, onclick: () => setFolders(ix.folders.filter((x) => x.path !== f.path).map((x) => x.path)) }, 'Remove'))))))
       : h('p', { class: 'lede' }, 'None. Use this for a folder whose files the scan would not recognise.'),
+    historySection(),
+  ];
+}
+
+const HIST_WHEN = (iso) => (iso ? dateTime(Date.parse(iso)) : '');
+const signed = (n, sign) => (n ? `${sign}${n.toLocaleString()}` : '');
+
+/** Each drive over time: when it was scanned or changed, and what it held. */
+function historySection() {
+  const H = state.history;
+  if (!H) return null;
+  return [
+    h('div', { class: 'row toolbar spaced' }, h('strong', {}, 'Drives over time'),
+      h('span', { class: 'none' }, 'Every drive the index has covered, as of its latest record.')),
+    H.drives.length
+      ? grid('histdrives', [
+          { label: 'Drive', value: (d) => `${d.letter || ''} ${d.label || ''}`.trim(), cell: (d) => `${d.letter || '?'} ${d.label || 'no name'}` },
+          { label: 'Indexed files', num: true, value: (d) => d.files, cell: (d) => (d.files || 0).toLocaleString() },
+          { label: 'Their size', num: true, value: (d) => d.bytes, cell: (d) => bytes(d.bytes || 0) },
+          { label: 'With checksum', num: true, value: (d) => (d.files ? d.hashed / d.files : 0), text: (d) => d.hashed, cell: (d) => (d.files ? `${Math.floor((d.hashed / d.files) * 100)}%` : '') },
+          { label: 'Free then', num: true, value: (d) => d.free || 0, cell: (d) => (d.size ? `${bytes(d.free || 0)} of ${bytes(d.size)}` : '') },
+          { label: 'Last scanned', cls: 'date', value: (d) => d.lastScan || '', cell: (d) => HIST_WHEN(d.lastScan) },
+          { label: 'Last record', cls: 'date', value: (d) => d.lastAt || '', cell: (d) => HIST_WHEN(d.lastAt) },
+          { label: 'First record', cls: 'date', value: (d) => d.firstAt || '', cell: (d) => HIST_WHEN(d.firstAt) },
+        ], H.drives, { name: 'CardMap drives', sort: { col: 0, dir: 1 } })
+      : h('p', { class: 'lede' }, 'Nothing recorded yet. A record is added after each scan, and when files change on an indexed drive.'),
+    H.rows.length ? h('div', { class: 'row toolbar spaced' }, h('strong', {}, 'History'),
+      h('span', { class: 'none' }, 'File changes seen while CardMap is open are added up into one line per drive per day.')) : null,
+    H.rows.length
+      ? grid('history', [
+          { label: 'When', cls: 'date', value: (r) => r.at, cell: (r) => HIST_WHEN(r.at) },
+          { label: 'Drive', value: (r) => `${r.letter || ''} ${r.label || ''}`.trim(), cell: (r) => `${r.letter || '?'} ${r.label || ''}` },
+          { label: 'What happened', value: (r) => r.what, cell: (r) => r.what },
+          { label: 'Added', num: true, value: (r) => r.added, cell: (r) => h('span', { class: r.added ? 'ok' : 'none' }, signed(r.added, '+')) },
+          { label: 'Removed', num: true, value: (r) => r.removed, cell: (r) => h('span', { class: r.removed ? 'part' : 'none' }, signed(r.removed, '-')) },
+          { label: 'Indexed files', num: true, value: (r) => r.files, cell: (r) => (r.files || 0).toLocaleString() },
+          { label: 'Their size', num: true, value: (r) => r.bytes, cell: (r) => bytes(r.bytes || 0) },
+          { label: 'Free', num: true, value: (r) => r.free || 0, cell: (r) => (r.free != null ? bytes(r.free) : '') },
+        ], H.rows, { name: 'CardMap drive history', sort: { col: 0, dir: -1 } })
+      : null,
   ];
 }
 
@@ -1096,6 +1139,14 @@ api.on('drives', async ({ newDrives }) => {
   state.newDrives = newDrives || [];
   renderSidebar();
   if (state.view === 'index') await loadIndex();
+});
+
+// The watcher picked up file changes on an indexed drive.
+api.on('libchanged', async (c) => {
+  if (state.view !== 'index') return;
+  const bits = [c.added && `${c.added} added`, c.changed && `${c.changed} changed`, c.removed && `${c.removed} removed`].filter(Boolean).join(', ');
+  state.lastResult = { info: `Files changed on your drives and the index was updated: ${bits}.` };
+  await loadIndex();
 });
 
 // A drive has come back under a different letter and its saved locations were updated.

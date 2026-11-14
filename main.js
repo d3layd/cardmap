@@ -9,6 +9,8 @@ const { DatabaseSync } = require('node:sqlite');
 const { openDb, getSettings, setSettings } = require('./core/db');
 const { lookup } = require('./core/lookup');
 const { fileMap } = require('./core/filemap');
+const { recordScan, recordChanges, history, drivesOverTime } = require('./core/history');
+const { createWatcher } = require('./core/watch');
 const { editsStatus, exportEdits, pairExport } = require('./core/lredits');
 
 let dbFile = null;
@@ -61,8 +63,8 @@ const { setVolumes, syncDb, pin, currentPath, online, pathExists } = require('./
 const { scanCard, cardSummary } = require('./core/cards');
 const { runImport } = require('./core/importer');
 const { findOriginalsRoots, runLightroomCheck } = require('./core/lightroom');
-const { runFolderScan, inventory, hashPending, hashCard, indexStatus, discover, foundFolders, foundPrefixes, dropScanned, dropWholeDrive } = require('./core/libindex');
-const { describeRules, prefixList, cleanPrefix } = require('./core/discover');
+const { runFolderScan, inventory, hashPending, hashCard, applyChanges, indexStatus, discover, foundFolders, foundPrefixes, dropScanned, dropWholeDrive } = require('./core/libindex');
+const { describeRules, prefixList, cleanPrefix, learnPrefixes, classify } = require('./core/discover');
 const { overview, listFiles } = require('./core/library');
 
 let win = null;
@@ -80,9 +82,11 @@ const send = (channel, payload) => {
 // The background indexer has its own slot, separate from the one-at-a-time task above.
 let bg = null;
 let bgProgress = null;
-let indexAgain = false;
+let nextRun = null; // { hashOnly, reason }: run again once the current run finishes
+let volumesLatest = []; // as of the last poll, with free space
 let userPaused = false; // Pause pressed: no automatic runs until Start is pressed again
 let scheduleIndex = () => {};
+let refreshWatch = () => {};
 let startIndexing = () => {};
 // Set up in registerIpc: what to do when drives or cards come and go.
 let onVolumesChanged = () => {};
@@ -93,6 +97,7 @@ let volumeKey = null;
 async function refreshDrives() {
   try {
     const { cards, volumes } = await listDrives();
+    volumesLatest = volumes;
     // Drives are known by serial number, so a changed letter is noticed here and the
     // recorded paths for that drive are rewritten to the new letter.
     const key = JSON.stringify(volumes.map((v) => [v.serial, v.letter]));
@@ -258,6 +263,14 @@ function registerIpc() {
 
   // ----- The library index: saved checksums for the files in those folders -----
   const onlineFolders = () => libraryFolders().filter((f) => f.exists).map((f) => f.path);
+  // The drives your extra folders are on.
+  const folderVols = () => {
+    try {
+      return JSON.parse(getSettings(db).libraryFolders || '[]').map((p) => (typeof p === 'string' ? pin(p) : p).vol).filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
   // Which drives the imported-media scan covers (by drive ID), and folders left out of it.
   const scanSerials = () => {
     try {
@@ -314,11 +327,13 @@ function registerIpc() {
   ipcMain.handle('index:setDrives', (_e, serials) => {
     setSettings(db, { indexDrives: JSON.stringify([...new Set(serials || [])]) });
     markKnown(serials || []);
+    refreshWatch();
   });
   ipcMain.handle('index:exclude', (_e, folder) => {
     const pins = excludedPins().filter((p) => currentPath(p).toLowerCase() !== String(folder).toLowerCase());
     pins.push(pin(folder));
     setSettings(db, { indexExcludes: JSON.stringify(pins) });
+    refreshWatch();
     return dropScanned(db, folder);
   });
   ipcMain.handle('index:include', (_e, folder) => {
@@ -333,8 +348,15 @@ function registerIpc() {
   //   1. scan the ticked drives for imported camera media (names and sizes only);
   //   2. list the extra folders;
   //   3. if asked, read every file that has no checksum yet (the slow part).
-  startIndexing = (withChecksums = true) => {
+  // Drives the index covers right now (ticked drives and drives holding your folders).
+  const historyVolumes = () => {
+    const vols = new Set([...scanSerials(), ...folderVols()]);
+    return volumesLatest.filter((v) => vols.has(v.serial) && !cardSerials().has(v.serial));
+  };
+  // opts: { reason: why it runs (for the drive history), hashOnly: skip the scan, just read checksums }
+  startIndexing = (withChecksums = true, opts = {}) => {
     if (bg) return;
+    const reason = opts.reason || 'manual';
     const j = { cancelled: false };
     bg = j;
     bgProgress = { label: 'Starting' };
@@ -344,9 +366,11 @@ function registerIpc() {
       send('bg', p);
     };
     (async () => {
+      if (opts.hashOnly) return { hashOnly: true, ...(await hashPending(db, { shouldPause: () => Boolean(job) }, j, emit)) };
       const scan = await discover(db, scanRoots(), { excluded: excludedPins().map((p) => currentPath(p)) }, j, emit);
       if (j.cancelled) return { ...scan, scanOnly: true, cancelled: true };
       await inventory(db, onlineFolders(), j, emit);
+      if (!j.cancelled) recordScan(db, historyVolumes(), reason);
       if (!withChecksums) return { ...scan, scanOnly: true };
       return { scan, ...(await hashPending(db, { shouldPause: () => Boolean(job) }, j, emit)) };
     })()
@@ -357,9 +381,10 @@ function registerIpc() {
       .then((out) => {
         bg = null;
         bgProgress = null;
-        if (indexAgain && !(out.result && out.result.cancelled)) {
-          indexAgain = false;
-          setTimeout(() => startIndexing(true), 2000);
+        if (nextRun && !(out.result && out.result.cancelled)) {
+          const n = nextRun;
+          nextRun = null;
+          setTimeout(() => startIndexing(true, n), 2000);
         }
         // Finished everything it could reach: nothing to resume next launch.
         if (out.result && !out.result.cancelled && !out.result.scanOnly) setSettings(db, { libIndexAuto: '' });
@@ -368,19 +393,50 @@ function registerIpc() {
   };
   ipcMain.handle('index:start', () => {
     userPaused = false;
-    return startIndexing(true);
+    return startIndexing(true, { reason: 'manual' });
   });
 
   // ----- Keeping things up to date on their own -----
   const autoOn = (key) => getSettings(db)[key] !== '0';
   // Run the indexer now, or once more after the current run, to pick up new folders and
   // files and read anything still without a checksum.
-  scheduleIndex = () => {
+  scheduleIndex = (reason = 'timer', hashOnly = false) => {
     if (process.env.CARDMAP_SHOT || userPaused || !autoOn('autoIndex')) return;
     if (!scanRoots().length && !onlineFolders().length) return;
-    if (bg) indexAgain = true;
-    else startIndexing(true);
+    if (bg) {
+      // A full run covers a checksum-only one; keep the stronger of the two.
+      if (!nextRun || nextRun.hashOnly) nextRun = { reason, hashOnly };
+    } else startIndexing(true, { reason, hashOnly });
   };
+
+  // ----- Watching the indexed drives and folders for changes -----
+  const watcher = createWatcher(async (batch) => {
+    const prefixes = learnPrefixes(db);
+    const dirKey = (f) => `${String(f).toLowerCase().replace(/[\\/]+$/, '')}\\`;
+    const folders = onlineFolders().map(dirKey);
+    const excluded = excludedPins().map((p) => dirKey(currentPath(p)));
+    const scanned = new Set(scanRoots().map((r) => r.slice(0, 2).toLowerCase()));
+    const ruleFor = (p) => {
+      const lower = p.toLowerCase();
+      if (folders.some((f) => lower.startsWith(f))) return { src: 'folder', keep: (q) => isMedia(path.basename(q)) || null };
+      if (scanned.has(lower.slice(0, 2)) && !excluded.some((x) => lower.startsWith(x))) return { src: 'scan', keep: (q, size) => classify(q, size, prefixes) };
+      return null;
+    };
+    try {
+      const r = await applyChanges(db, batch, ruleFor);
+      recordChanges(db, r.byVol, volumesLatest);
+      if (r.added || r.changed || r.removed) send('libchanged', { added: r.added, changed: r.changed, removed: r.removed });
+      if (r.added || r.changed) scheduleIndex('changes', true);
+    } catch {
+      /* the next change or scan catches up */
+    }
+  });
+  refreshWatch = () => {
+    if (process.env.CARDMAP_SHOT || !autoOn('autoIndex')) return watcher.close();
+    watcher.set([...scanRoots(), ...onlineFolders()]);
+  };
+  ipcMain.handle('index:watching', () => watcher.watching());
+  ipcMain.handle('history', () => ({ rows: history(db), drives: drivesOverTime(db) }));
   // Drives CardMap has already asked about (or that were here before this feature).
   const knownDrives = () => {
     try {
@@ -398,8 +454,9 @@ function registerIpc() {
   onVolumesChanged = (added, first) => {
     if (knownDrives() === null) markKnown(volumesNow.map((v) => v.serial)); // first run: only drives that turn up later count as new
     if (first) return;
-    const folderVols = new Set(libraryFolders().length ? JSON.parse(getSettings(db).libraryFolders || '[]').map((p) => (typeof p === 'string' ? pin(p) : p).vol) : []);
-    if (added.some((v) => scanSerials().includes(v.serial) || folderVols.has(v.serial))) scheduleIndex();
+    const folderVolSet = new Set(folderVols());
+    if (added.some((v) => scanSerials().includes(v.serial) || folderVolSet.has(v.serial))) scheduleIndex('connected');
+    refreshWatch();
     send('drives', { newDrives: newDrives() });
   };
   ipcMain.handle('index:newDrives', () => newDrives());
@@ -410,7 +467,8 @@ function registerIpc() {
   ipcMain.handle('index:addDrive', (_e, serial) => {
     markKnown([serial]);
     setSettings(db, { indexDrives: JSON.stringify([...new Set([...scanSerials(), serial])]) });
-    scheduleIndex();
+    scheduleIndex('manual');
+    refreshWatch();
     return newDrives();
   });
 
@@ -450,13 +508,14 @@ function registerIpc() {
   });
   ipcMain.handle('index:stop', () => {
     userPaused = true;
-    indexAgain = false;
+    nextRun = null;
     setSettings(db, { libIndexAuto: '' });
     if (bg) bg.cancelled = true;
   });
   ipcMain.handle('library:setFolders', (_e, list) => {
     const clean = [...new Set((list || []).map((p) => String(p).trim()).filter(Boolean))];
     setSettings(db, { libraryFolders: JSON.stringify(clean.map(pin)) });
+    refreshWatch();
     return libraryFolders();
   });
 
@@ -638,7 +697,8 @@ function registerIpc() {
   ipcMain.handle('settings:get', settingsOut);
   ipcMain.handle('settings:set', (_e, obj) => {
     setSettings(db, obj);
-    if (obj && obj.autoIndex === '1') scheduleIndex();
+    if (obj && obj.autoIndex === '1') scheduleIndex('manual');
+    if (obj && 'autoIndex' in obj) refreshWatch();
     return settingsOut();
   });
 
@@ -723,9 +783,10 @@ app.whenReady().then(() => {
     // still without a checksum), then every 6 hours while CardMap is open.
     setTimeout(() => {
       if (getSettings(db).libIndexAuto === '1') startIndexing();
-      else scheduleIndex();
+      else scheduleIndex('opened');
+      refreshWatch();
     }, 9000);
-    setInterval(scheduleIndex, 6 * 60 * 60 * 1000);
+    setInterval(() => scheduleIndex('timer'), 6 * 60 * 60 * 1000);
   }
 });
 
