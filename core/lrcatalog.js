@@ -7,7 +7,8 @@
 // a card file be matched to the catalog exactly.
 //
 // Only metadata is cached: names, sizes, checksums, dates, camera details, ratings and
-// albums. No image data and no edit settings. After the first read, a refresh only reads
+// albums, and whether a photo was edited. No image data; the edit settings themselves
+// are read straight from Lightroom's folder when they are archived (see lredits.js). After the first read, a refresh only reads
 // what Lightroom has changed since (the catalog numbers every change in sequence).
 const fs = require('node:fs');
 const path = require('node:path');
@@ -15,7 +16,7 @@ const { DatabaseSync } = require('node:sqlite');
 const { decode } = require('./msgpack');
 const { tx, getSettings, setSettings } = require('./db');
 
-const CACHE_VERSION = '2';
+const CACHE_VERSION = '3';
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS lr_assets (
   asset_id TEXT PRIMARY KEY,
@@ -34,7 +35,9 @@ CREATE TABLE IF NOT EXISTS lr_assets (
   camera_serial TEXT,
   iso INTEGER,
   rating INTEGER,
-  uploaded INTEGER NOT NULL DEFAULT 0
+  uploaded INTEGER NOT NULL DEFAULT 0,
+  edited INTEGER NOT NULL DEFAULT 0, -- changed from Lightroom's defaults
+  xmp_sha TEXT          -- the edit settings file Lightroom keeps (in "settings", when on this computer)
 );
 CREATE INDEX IF NOT EXISTS lr_assets_size ON lr_assets (size);
 CREATE INDEX IF NOT EXISTS lr_assets_sha ON lr_assets (sha256);
@@ -113,6 +116,7 @@ function assetRow(id, subtype, content, annotation) {
   const ratings = doc.ratings && typeof doc.ratings === 'object' ? Object.values(doc.ratings) : [];
   const rating = ratings.map((r) => r && r.rating).find((r) => Number.isFinite(r));
   const cap = str(doc.captureDate);
+  const dev = doc.develop && typeof doc.develop === 'object' ? doc.develop : null;
   return [
     id, subtype, String(imp.sha256).toLowerCase(), int(imp.fileSize), str(imp.fileName),
     cap, cap ? cap.slice(0, 10) : null, str(imp.importTimestamp), str(imp.importedOnDevice) && imp.importedOnDevice.split(' {')[0],
@@ -120,6 +124,8 @@ function assetRow(id, subtype, content, annotation) {
     str(xmp.tiff && xmp.tiff.Model), str(xmp.aux && xmp.aux.Lens), str(xmp.aux && xmp.aux.SerialNumber),
     int(xmp.exif && xmp.exif.ISOSpeedRatings), rating == null ? null : int(rating),
     annotation && annotation.indexOf(K_MASTER) >= 0 ? 1 : 0,
+    dev && dev.fromDefaults === false ? 1 : 0,
+    (dev && dev.xmpCameraRaw && str(dev.xmpCameraRaw.sha256)) || null,
   ];
 }
 
@@ -163,7 +169,7 @@ async function refreshIndex(db, catalogs, job, emit, opts = {}) {
   const seqs = JSON.parse(getSettings(db).lrSeq || '{}');
   const upAsset = db.prepare(
     `INSERT OR REPLACE INTO lr_assets (asset_id, kind, sha256, size, name, capture_time, capture_date, imported, device,
-       width, height, camera, lens, camera_serial, iso, rating, uploaded) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       width, height, camera, lens, camera_serial, iso, rating, uploaded, edited, xmp_sha) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   const delAsset = db.prepare('DELETE FROM lr_assets WHERE asset_id = ?');
   const upAlbum = db.prepare('INSERT OR REPLACE INTO lr_albums (album_id, name, subtype, parent_id) VALUES (?, ?, ?, ?)');
@@ -292,4 +298,4 @@ function albumsForAsset(db, assetId) {
     .filter(Boolean);
 }
 
-module.exports = { findCatalogs, refreshIndex, cacheStatus, albumsOverview, albumsForAsset, ensureSchema };
+module.exports = { findCatalogs, refreshIndex, cacheStatus, albumsOverview, albumsForAsset, albumPaths, ensureSchema };

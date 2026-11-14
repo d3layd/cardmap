@@ -8,6 +8,8 @@ const os = require('node:os');
 const { DatabaseSync } = require('node:sqlite');
 const { openDb, getSettings, setSettings } = require('./core/db');
 const { lookup } = require('./core/lookup');
+const { fileMap } = require('./core/filemap');
+const { editsStatus, exportEdits, pairExport } = require('./core/lredits');
 
 let dbFile = null;
 
@@ -457,6 +459,18 @@ function registerIpc() {
     setSettings(db, { libraryFolders: JSON.stringify(clean.map(pin)) });
     return libraryFolders();
   });
+
+  // ----- Every unique file, its copies, and whether Lightroom has it -----
+  ipcMain.handle('filemap', (_e, opts) => fileMap(db, opts || {}));
+
+  // ----- Archiving Lightroom edits -----
+  const archiveDir = () => getSettings(db).lrArchiveDir || path.join(path.dirname(dbFile), 'Lightroom archive');
+  ipcMain.handle('lredits:status', () => ({ ...editsStatus(db, findCatalogs('')), dest: archiveDir() }));
+  ipcMain.handle('lredits:setDest', (_e, dir) => setSettings(db, { lrArchiveDir: dir || '' }));
+  ipcMain.handle('lredits:export', (_e, { sidecars }) =>
+    startJob('lredits', (j, emit) => exportEdits(db, { catalogs: findCatalogs(''), dest: archiveDir(), sidecars: Boolean(sidecars) }, j, emit)));
+  ipcMain.handle('lredits:pair', (_e, { folder, sidecars }) =>
+    startJob('lrpair', (j, emit) => pairExport(db, { folder, dest: archiveDir(), sidecars: Boolean(sidecars) }, j, emit)));
 
   // ----- Duplicates and the safe-to-delete list -----
   let dupeReport = null;

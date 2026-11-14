@@ -164,6 +164,7 @@ function renderSidebar() {
     h('button', { class: `nav-item${state.view === 'map' || (state.view === 'files' && state.files.back === 'map') ? ' active' : ''}`, onclick: () => show('map') }, h('span', { class: 'grow' }, 'Where things are')),
     h('button', { class: `nav-item${state.view === 'index' ? ' active' : ''}`, onclick: () => show('index') },
       h('span', { class: 'grow' }, 'Library index', h('div', { class: 'sub', id: 'navbg' }, state.bg ? `Indexing${state.bg.bytesTotal ? ` ${Math.floor((state.bg.bytesDone / state.bg.bytesTotal) * 100)}%` : ''}` : state.newDrives.length ? `New drive connected` : ''))),
+    h('button', { class: `nav-item${state.view === 'allfiles' ? ' active' : ''}`, onclick: () => show('allfiles') }, h('span', { class: 'grow' }, 'All files')),
     h('button', { class: `nav-item${state.view === 'dupes' ? ' active' : ''}`, onclick: () => show('dupes') }, h('span', { class: 'grow' }, 'Duplicates')),
     h('button', { class: `nav-item${state.view === 'lightroom' ? ' active' : ''}`, onclick: () => show('lightroom') }, h('span', { class: 'grow' }, 'Lightroom library')),
     h('button', { class: `nav-item${state.view === 'settings' ? ' active' : ''}`, onclick: () => show('settings') }, h('span', { class: 'grow' }, 'Settings')),
@@ -184,11 +185,14 @@ function show(view) {
   if (view === 'lightroom') loadLightroom();
   if (view === 'index') loadIndex();
   if (view === 'dupes') loadDupes(true);
+  if (view === 'allfiles') loadAllFiles();
+  if (view === 'lightroom') loadEdits();
   render();
 }
 // Development hook used by the screenshot aid in main.js.
 window.__show = (v) => {
   if (v.startsWith('import:')) { state.drawer = 'import'; return openMounted(v.slice(7)); }
+  if (v.startsWith('allfiles:')) { state.allFiles = { show: v.slice(9), q: '' }; return show('allfiles'); }
   if (v.startsWith('dupes:')) { state.dupeTab = v.slice(6); return show('dupes'); }
   if (v.startsWith('lookup:')) { state.lookup = { q: v.slice(7), res: null }; show('lookup'); return runLookup(); }
   if (v === 'rules') { state.rulesOpen = true; return show('index'); }
@@ -230,6 +234,18 @@ function resultNotice() {
     text = x.changed
       ? `Lightroom's catalog was read: ${x.read.toLocaleString()} changed entries picked up. The cache now holds ${x.assets.toLocaleString()} photos and videos in ${x.albums.toLocaleString()} albums.`
       : 'Already up to date: Lightroom has not changed its catalog since the last read.';
+  } else if (r.kind === 'lredits') {
+    text = `Lightroom archive ${x.cancelled ? 'stopped' : 'saved'} in ${x.dest}: details of ${x.photos.toLocaleString()} photos in lightroom-catalog.json, and ${x.written.toLocaleString()} edit files.`;
+    if (x.alreadyArchived) text += ` ${x.alreadyArchived.toLocaleString()} edits were already in the archive.`;
+    if (x.cloudOnly) text += ` ${x.cloudOnly.toLocaleString()} edited photos have their edits only in Lightroom's cloud, so they could not be saved from here.`;
+    if (x.sidecars || x.sidecarsSame || x.sidecarsKept) text += ` ${x.sidecars} .xmp files put next to raw files${x.sidecarsSame ? `, ${x.sidecarsSame} were already there` : ''}${x.sidecarsKept ? `, ${x.sidecarsKept} left alone because a different .xmp was already there` : ''}.`;
+    if (x.sidecarsOffline) text += ` ${x.sidecarsOffline} raw copies are on drives that are not connected.`;
+    if (x.failed) text += ` ${x.failed} could not be written.`;
+  } else if (r.kind === 'lrpair') {
+    text = `Lightroom export paired: ${x.matched.toLocaleString()} of ${x.xmp.toLocaleString()} .xmp files matched to Lightroom photos and saved in the archive.`;
+    if (x.sidecars || x.sidecarsSame || x.sidecarsKept) text += ` ${x.sidecars} put next to your raw files${x.sidecarsSame ? `, ${x.sidecarsSame} were already there` : ''}${x.sidecarsKept ? `, ${x.sidecarsKept} left alone because a different .xmp was already there` : ''}.`;
+    if (x.sidecarsOffline) text += ` ${x.sidecarsOffline} raw copies are on drives that are not connected.`;
+    if (x.unmatched) text += ` ${x.unmatched} did not match a Lightroom photo by name and size (for example ${x.unmatchedNames.slice(0, 3).join(', ')}).`;
   } else if (r.kind === 'folderscan') {
     text = `Match${x.cancelled ? ' cancelled' : ' finished'}: checked against ${(x.indexed ?? x.scanned).toLocaleString()} indexed files. ${x.filesWithCopies} card file${x.filesWithCopies === 1 ? ' has' : 's have'} a matching local copy (${x.matched} newly recorded, ${x.alreadyKnown} already known).`;
     if (x.renamed) text += ` ${x.renamed} of the new matches had a different file name.`;
@@ -848,7 +864,7 @@ function lightroomView() {
   const albums = lr.albums;
   return [
     h('h1', {}, 'Lightroom library'),
-    h('p', { class: 'lede' }, 'A copy of the details in Lightroom\'s catalog, kept by CardMap. Details only: no pictures and no edits. Lightroom\'s own files are never changed.'),
+    h('p', { class: 'lede' }, 'A copy of the details in Lightroom\'s catalog, kept by CardMap: names, checksums, dates, albums and whether each photo was edited. No pictures. Lightroom\'s own files are never changed.'),
     resultNotice(),
     h('div', { class: 'card-box' },
       !st.catalogs.length
@@ -863,6 +879,8 @@ function lightroomView() {
         h('button', { class: 'btn primary', disabled: busy() || !st.catalogs.length, onclick: () => run('lrcache:refresh', false) }, st.assets ? 'Refresh' : 'Read the catalog'),
         h('button', { class: 'btn', disabled: busy() || !st.catalogs.length, title: 'Throw the cached copy away and read everything again',
           onclick: () => run('lrcache:refresh', true) }, 'Rebuild from scratch'))),
+    st.assets ? editsSection() : null,
+    st.assets ? h('div', { class: 'row toolbar spaced' }, h('strong', {}, 'Albums')) : null,
     st.assets ? grid('albums', [
       { label: 'Album', cell: (a) => a.path },
       { label: 'Photos', num: true, value: (a) => a.count, cell: (a) => a.count.toLocaleString() },
@@ -871,6 +889,41 @@ function lightroomView() {
       { label: 'Last taken', cls: 'date', value: (a) => a.last || '', cell: (a) => a.last || '' },
     ], albums, { name: 'Lightroom albums', sort: { col: 4, dir: -1 } }) : null,
   ];
+}
+
+async function loadEdits() {
+  state.edits = await api.invoke('lredits:status');
+  if (state.view === 'lightroom') renderMain();
+}
+
+/** Save Lightroom's edits as .xmp files (and a JSON record of every photo) so originals can leave Lightroom. */
+function editsSection() {
+  const E = state.edits;
+  if (!E) return h('div', { class: 'card-box' }, 'Counting edits');
+  const side = state.editsSidecars !== false;
+  return h('div', { class: 'card-box' },
+    h('h3', {}, 'Archive Lightroom edits'),
+    h('div', {}, h('strong', {}, `${E.edited.toLocaleString()} of ${E.assets.toLocaleString()} photos are edited in Lightroom.`),
+      ` The edit settings for ${E.here.toLocaleString()} are on this computer and can be saved now. The other ${E.cloudOnly.toLocaleString()} are only in Lightroom's cloud.`),
+    h('ul', { class: 'steps' },
+      h('li', {}, 'Saving writes a .xmp file for each edit this computer has, plus lightroom-catalog.json: every Lightroom photo with its checksum, albums, rating, edit file and where its local copies are.'),
+      h('li', {}, `${E.withRaw.toLocaleString()} edited photos also have a raw file on your drives. A .xmp next to a raw file, with the same name, is how Lightroom Classic, Camera Raw and Bridge open it with its edits.`),
+      h('li', {}, 'For edits only in the cloud: in Lightroom, select the photos (an album at a time works well), choose Export, set File Type to "Original + Settings" and export to a folder. Then press "Pair a Lightroom export" below and pick that folder.')),
+    h('div', { class: 'field' }, h('label', {}, 'Archive folder'),
+      h('div', { class: 'row' }, h('span', { class: 'dir grow' }, E.dest),
+        h('button', { class: 'btn', onclick: async () => {
+          const p = await api.invoke('pickFolder', E.dest);
+          if (p) { await api.invoke('lredits:setDest', p); await loadEdits(); }
+        } }, 'Change'),
+        h('button', { class: 'link', onclick: () => api.invoke('reveal', E.dest) }, 'Open'))),
+    h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: side, onchange: (e) => { state.editsSidecars = e.target.checked; } }),
+      'Also put each .xmp next to the matching raw files on your drives. Adds a small file beside each raw; never replaces an .xmp that is already there.'),
+    h('div', { class: 'row actions' },
+      h('button', { class: 'btn primary', disabled: busy(), onclick: () => run('lredits:export', { sidecars: state.editsSidecars !== false }) }, 'Save the archive'),
+      h('button', { class: 'btn', disabled: busy(), title: 'Pick a folder exported from Lightroom with "Original + Settings"', onclick: async () => {
+        const folder = await api.invoke('pickFolder', '');
+        if (folder) run('lredits:pair', { folder, sidecars: state.editsSidecars !== false });
+      } }, 'Pair a Lightroom export')));
 }
 
 // ---------- find a file ----------
@@ -953,7 +1006,7 @@ function welcomeView() {
 }
 
 function renderMain() {
-  const views = { dupes: dupesView, lookup: lookupView, card: cardView, files: filesView, map: mapView, index: indexView, lightroom: lightroomView, settings: settingsView, welcome: welcomeView };
+  const views = { allfiles: allFilesView, dupes: dupesView, lookup: lookupView, card: cardView, files: filesView, map: mapView, index: indexView, lightroom: lightroomView, settings: settingsView, welcome: welcomeView };
   document.getElementById('main').replaceChildren(...views[state.view]().flat(Infinity).filter(Boolean));
 }
 
@@ -1060,7 +1113,8 @@ api.on('job', async (p) => {
     if (!p.silent || p.error) state.lastResult = p;
     await refreshSummary();
     if (state.view === 'map') await loadMap();
-    if (state.view === 'lightroom') await loadLightroom();
+    if (state.view === 'lightroom') await Promise.all([loadLightroom(), loadEdits()]);
+    if (state.view === 'allfiles') await loadAllFiles();
     if (state.view === 'index') await loadIndex();
     if (p.kind === 'dupes' || state.view === 'dupes') await loadDupes(false);
     if (p.kind === 'recheck' && !p.error && !(p.result && p.result.cancelled)) { render(); run('dupes:build'); return; }
