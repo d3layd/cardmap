@@ -185,4 +185,35 @@ async function runLightroomCheck(db, opts, job, emit) {
   return result;
 }
 
-module.exports = { findOriginalsRoots, runLightroomCheck, LR_PREFIX };
+/**
+ * Quick Lightroom match from the cached catalog, with nothing read from disk: every card
+ * file whose checksum is known and equals a Lightroom original is recorded as in
+ * Lightroom (confirmed only if its upload is). Used once a card's checksums are read.
+ * Returns { found, notUploaded }.
+ */
+function matchLightroomCache(db, cardId) {
+  const out = { found: 0, notUploaded: 0 };
+  let byKey;
+  try {
+    byKey = db.prepare('SELECT asset_id, uploaded FROM lr_assets WHERE sha256 = ? AND size = ?');
+  } catch {
+    return out; // no Lightroom cache yet
+  }
+  const files = db
+    .prepare(
+      `SELECT f.id, f.sha256, f.size FROM files f WHERE f.card_id = ? AND f.sha256 IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM locations l WHERE l.file_id = f.id AND l.kind = 'lightroom' AND l.verified = 1)`
+    )
+    .all(cardId);
+  for (const f of files) {
+    const assets = byKey.all(f.sha256, f.size);
+    if (!assets.length) continue;
+    const up = assets.find((a) => a.uploaded);
+    addLocation(db, f.id, 'lightroom', `${LR_PREFIX}${(up || assets[0]).asset_id}`, Boolean(up), null);
+    if (up) out.found += 1;
+    else out.notUploaded += 1;
+  }
+  return out;
+}
+
+module.exports = { findOriginalsRoots, runLightroomCheck, matchLightroomCache, LR_PREFIX };

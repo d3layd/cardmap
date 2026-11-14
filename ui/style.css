@@ -74,10 +74,13 @@ h1 { font-size: 21px; font-weight: 600; margin: 0 0 4px; }
 .form-grid label { color: var(--muted); }
 .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
 
-input[type=text], input[type=search] {
+input[type=text], input[type=search], textarea {
   width: 100%; padding: 7px 9px; border-radius: 6px;
   border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit;
 }
+textarea { resize: vertical; }
+select { padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }
+.toolbar input[type=text].inline { width: 240px; }
 input:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 button.btn {

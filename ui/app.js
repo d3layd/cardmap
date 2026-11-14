@@ -221,6 +221,7 @@ function resultNotice() {
   let text = 'Done.';
   if (r.kind === 'import') {
     text = `${x.cancelled ? 'Import cancelled' : 'Import finished'}: ${x.copied} copied and verified, ${x.skipped} already in place, ${x.failed} failed.`;
+    if (x.groups) text += ` By group: ${x.groups.map((g) => `${[g.profile, g.shoot].filter(Boolean).join(': ')} ${g.copied} copied`).join('; ')}.`;
     const lo = x.leftOut || {};
     if (lo.skip || lo.unready) text += ` Left out: ${[lo.skip ? `${lo.skip} marked skip` : '', lo.unready ? `${lo.unready} not marked ready` : ''].filter(Boolean).join(', ')}.`;
   } else if (r.kind === 'lightroom') {
@@ -364,6 +365,7 @@ function importPanel(s, rows, keys, unit) {
     h('div', { class: 'row' }, h('h2', {}, 'Import from this card'), h('span', { class: 'spacer' }),
       h('button', { class: 'btn', onclick: () => { state.drawer = null; renderMain(); } }, 'Close')),
 
+    groupsSection(s),
     h('h3', {}, h('span', { class: 'step' }, '1'), 'What gets copied'),
     h('div', { class: 'what' },
       h('strong', {}, keys.length ? `${keys.length} selected ${unit}${keys.length === 1 ? '' : 's'}` : 'The whole card'),
@@ -478,7 +480,19 @@ function lightroomPanel(s, rows, keys, unit) {
   const chosen = keys.length ? rows.filter((g) => state.sel.has(g.key)) : rows;
   const count = chosen.reduce((n, g) => n + g.count, 0);
   const have = chosen.reduce((n, g) => n + g.lightroom, 0);
-  const query = { cardId: s.card.id, ...(keys.length ? (unit === 'date' ? { dates: keys } : { folders: keys }) : {}) };
+  // Which files: the latest import, the files marked Ready, the ticked rows, or the whole card.
+  const src = state.lrSources && state.lrSources.cardId === s.card.id ? state.lrSources : null;
+  if (!src) api.invoke('lightroom:sources', s.card.id).then((x) => { state.lrSources = { cardId: s.card.id, ...x }; renderMain(); });
+  const options = [
+    src && src.lastImport ? ['lastImport', `Files from the last import (${src.lastImport})`] : null,
+    src && src.ready ? ['ready', `Files marked Ready (${src.ready})`] : null,
+    keys.length ? ['rows', `The ${keys.length} ticked ${unit}${keys.length === 1 ? '' : 's'} (${count} files)`] : null,
+    ['card', `The whole card (${s.totals.count} files)`],
+  ].filter(Boolean);
+  const source = options.some(([k]) => k === state.form.lrSource) ? state.form.lrSource : options[0][0];
+  const query = { cardId: s.card.id,
+    ...(source === 'lastImport' || source === 'ready' ? { source }
+      : source === 'rows' ? (unit === 'date' ? { dates: keys } : { folders: keys }) : {}) };
   const tile = h('div', { class: 'dragtile', draggable: 'true', tabindex: '0',
     ondragstart: (e) => { e.preventDefault(); api.drag(query); } },
     h('strong', {}, 'Drag this onto Lightroom'), h('div', { class: 'none', id: 'lrpending' }, 'Counting files'));
@@ -494,9 +508,10 @@ function lightroomPanel(s, rows, keys, unit) {
 
     h('h3', {}, h('span', { class: 'step' }, '1'), 'What gets added'),
     h('div', { class: 'what' },
-      h('strong', {}, keys.length ? `${keys.length} selected ${unit}${keys.length === 1 ? '' : 's'}` : 'The whole card'),
-      h('div', { class: 'none' }, `${count} files. ${have} already recorded as in Lightroom.`),
-      h('div', { class: 'none' }, 'Run "Check Lightroom" first if you have not, so files already there are left out.')),
+      options.map(([k, label]) => h('label', { class: 'check' },
+        h('input', { type: 'radio', name: 'lrsource', checked: k === source, onchange: () => { state.form.lrSource = k; renderMain(); } }), ` ${label}`)),
+      source === 'rows' || source === 'card' ? h('div', { class: 'none' }, `${source === 'card' ? s.totals.lightroom : have} of these are already recorded as in Lightroom.`) : null,
+      h('div', { class: 'none' }, 'Files already in Lightroom and files marked skip are left out.')),
 
     h('h3', {}, h('span', { class: 'step' }, '2'), 'Hand them to Lightroom'),
     h('button', { class: 'btn wide', onclick: async () => {
@@ -658,6 +673,12 @@ const rulesTitle = (r) => `A file is safe with verified copies on ${r.copies} se
 function reviewPrompt(s, title) {
   const t = s.totals;
   if (!t.unsaved) return null;
+  // Until the card's checksums are read, CardMap cannot tell which files are already on
+  // your drives or in Lightroom, so do not ask for a review yet.
+  if (s.mounted && state.cardBg[s.card.serial]) {
+    return h('div', { class: 'hint' }, `Checking ${t.unsaved.toLocaleString()} file${t.unsaved === 1 ? '' : 's'} with no copy recorded yet against your drives and Lightroom. `,
+      'Once the checksums are read, anything that is already saved drops off this count, and CardMap asks you to review the rest.');
+  }
   const open = () => openFiles({ cardId: s.card.id, unsaved: true }, `${title}: only on the card`,
     'Not copied to any drive and not in Lightroom. Mark each Ready to import it, or Skip to leave it out.');
   const n = (k) => `${k.toLocaleString()} file${k === 1 ? '' : 's'}`;
@@ -669,6 +690,85 @@ function reviewPrompt(s, title) {
     h('span', { class: 'grow' }, h('strong', {}, `${n(t.unreviewed)} on this card ${t.unreviewed === 1 ? 'is' : 'are'} not saved anywhere yet`),
       ' (not copied to your drives and not in Lightroom) and not reviewed. Mark each one Ready to import it, or Skip to leave it out.'),
     h('button', { class: 'btn primary', onclick: open }, `Review ${n(t.unreviewed)}`));
+}
+
+// ---------- import profiles and groups ----------
+// A group is a profile (where files go) plus a shoot name. Files are put in a group while
+// reviewing, then "Import all groups" copies each group with its own profile.
+const groupText = (r) => (r.group ? [r.group, r.groupShoot].filter(Boolean).join(': ') : '');
+async function loadProfiles() {
+  state.profiles = await api.invoke('profiles:get');
+  return state.profiles;
+}
+function groupBar(cardId, chosen, apply) {
+  if (!state.profiles) { loadProfiles().then(() => renderMain()); return null; }
+  const f = state.groupForm || (state.groupForm = { profile: '', shoot: '' });
+  if (!state.profiles.some((p) => p.name === f.profile)) f.profile = (state.profiles[0] || {}).name || '';
+  const prof = state.profiles.find((p) => p.name === f.profile);
+  if (!state.profiles.length) {
+    return h('div', { class: 'row toolbar' }, h('span', { class: 'none' }, 'To send files to different places in one import, make an import profile first.'),
+      h('button', { class: 'btn', onclick: () => show('settings') }, 'Make a profile'));
+  }
+  return h('div', { class: 'row toolbar' },
+    h('span', { class: 'none' }, chosen.length ? `Send ${chosen.length} selected to` : 'Tick files, then send them to'),
+    h('select', { 'aria-label': 'Import profile', onchange: (e) => { f.profile = e.target.value; f.shoot = ''; renderMain(); } },
+      state.profiles.map((p) => h('option', { value: p.name, selected: p.name === f.profile }, p.name))),
+    h('input', { type: 'text', class: 'inline', value: f.shoot, placeholder: prof && prof.shoot ? prof.shoot : 'Shoot name (optional)', 'aria-label': 'Shoot name',
+      oninput: (e) => { f.shoot = e.target.value; } }),
+    h('button', { class: 'btn primary', disabled: !chosen.length, onclick: () => apply(chosen, f.profile, f.shoot.trim() || (prof && prof.shoot) || '') }, 'Add to group'),
+    h('button', { class: 'btn', disabled: !chosen.some((r) => r.group), onclick: () => apply(chosen.filter((r) => r.group), null, '') }, 'Remove from group'),
+    h('span', { class: 'spacer' }),
+    h('button', { class: 'link', onclick: () => show('settings') }, 'Edit profiles'));
+}
+
+// The groups part of the Import panel: each group with where it goes, and one button.
+function groupsSection(s) {
+  const G = state.groups && state.groups.cardId === s.card.id ? state.groups.list : null;
+  if (!G) { api.invoke('groups:get', s.card.id).then((list) => { state.groups = { cardId: s.card.id, list }; renderMain(); }); return null; }
+  if (!G.length) return null;
+  if (!state.profiles) { loadProfiles().then(() => renderMain()); return null; }
+  const prof = new Map(state.profiles.map((p) => [p.name, p]));
+  return h('div', { class: 'what' },
+    h('strong', {}, `${G.length} import group${G.length === 1 ? '' : 's'} on this card`),
+    G.map((g) => {
+      const p = prof.get(g.profile);
+      return h('div', { class: 'none' }, h('strong', {}, [g.profile, g.shoot].filter(Boolean).join(': ')), ` · ${g.files} files, ${bytes(g.bytes)} → `,
+        p && p.dest ? [p.dest, p.backup ? ` + ${p.backup}` : '', p.extra.length ? ` + ${p.extra.length} more` : ''] : h('span', { class: 'part' }, 'no "Copy to" folder in this profile'));
+    }),
+    h('button', { class: 'btn primary wide', disabled: busy() || !s.mounted, onclick: () => run('import:groups', { cardId: s.card.id }) },
+      `Import all ${G.length} group${G.length === 1 ? '' : 's'}`),
+    h('div', { class: 'none' }, 'Each group is copied and verified with its own profile. Files not in a group are not part of this; use the settings below for those.'));
+}
+
+// Settings: the list of import profiles, edited in place and saved together.
+function profilesEditor() {
+  if (!state.profiles) { loadProfiles().then(() => { if (state.view === 'settings') renderMain(); }); return 'Loading'; }
+  const list = state.profileDraft || (state.profileDraft = state.profiles.map((p) => ({ ...p, extra: [...p.extra] })));
+  const field = (p, key, label, placeholder, browse) => {
+    const input = h('input', { type: 'text', value: p[key] || '', placeholder, 'aria-label': label, oninput: (e) => { p[key] = e.target.value; } });
+    return h('div', { class: 'field' }, h('label', {}, label), h('div', { class: 'row tight' }, input,
+      browse ? h('button', { class: 'btn', onclick: async () => { const x = await api.invoke('pickFolder', p[key] || ''); if (x) { p[key] = x; input.value = x; } } }, 'Browse') : null));
+  };
+  return [
+    list.map((p, i) => h('div', { class: 'card-box' },
+      field(p, 'name', 'Profile name', 'e.g. Client work'),
+      field(p, 'dest', 'Copy to', 'Main folder', true),
+      field(p, 'backup', 'Backup to (optional)', 'Ideally on a different drive', true),
+      h('div', { class: 'field' }, h('label', {}, 'Also copy to (optional, one folder per line)'),
+        h('textarea', { rows: 2, 'aria-label': 'Extra folders', oninput: (e) => { p.extra = e.target.value.split(/\r?\n/).map((x) => x.trim()).filter(Boolean); } }, p.extra.join('\n'))),
+      field(p, 'folderPattern', 'Folder name', '{date} {shoot}  (also {year} {month} {day}; use \\ for subfolders)'),
+      field(p, 'shoot', 'Default shoot name (optional)', 'Filled in when you add files to this profile'),
+      h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: Boolean(p.lightroom), onchange: (e) => { p.lightroom = e.target.checked; } }), ' Open Add to Lightroom after importing'),
+      h('div', { class: 'row actions' }, h('button', { class: 'btn', onclick: () => { list.splice(i, 1); renderMain(); } }, 'Remove this profile')))),
+    h('div', { class: 'row actions' },
+      h('button', { class: 'btn', onclick: () => { list.push({ name: '', dest: '', backup: '', extra: [], folderPattern: '', shoot: '', lightroom: false }); renderMain(); } }, 'Add a profile'),
+      h('button', { class: 'btn primary', onclick: async () => {
+        state.profiles = await api.invoke('profiles:save', list);
+        state.profileDraft = null;
+        state.lastResult = { info: `Saved ${state.profiles.length} import profile${state.profiles.length === 1 ? '' : 's'}.` };
+        renderMain();
+      } }, 'Save profiles')),
+  ];
 }
 
 // Whether Lightroom has a card file: Yes, Not confirmed (in the catalog, upload not confirmed) or No.
@@ -740,9 +840,18 @@ function filesView() {
       h('button', { class: 'btn', disabled: !chosen.length, onclick: () => markChosen('skip') }, 'Skip'),
       h('button', { class: 'btn', disabled: !chosen.length, onclick: () => markChosen(null) }, 'Clear'),
       canImport ? h('button', { class: 'btn primary', onclick: toImport }, `Import the ${ready} marked Ready`) : null) : null,
+    rows && cardId ? groupBar(cardId, chosen, async (list, profile, shoot) => {
+      await api.invoke('groups:set', { cardId, fileIds: list.map((r) => r.id), profile, shoot });
+      for (const r of list) { r.group = profile; r.groupShoot = profile ? shoot : ''; if (profile) r.mark = 'ready'; }
+      sel.clear();
+      state.lrSources = null;
+      await refreshSummary();
+      renderMain();
+    }) : null,
     rows && grid('files', [
       ...selCol,
       ...markCol,
+      ...(cardId ? [{ label: 'Group', value: (r) => groupText(r), cell: (r) => (r.group ? groupText(r) : h('span', { class: 'none' }, '')) }] : []),
       { label: 'Preview', sort: false, csv: false, cls: 'thumbcell', cell: (r) => thumb(r) },
       { label: 'File', value: (r) => r.name, text: (r) => [r.name, r.shoot].filter(Boolean).join(' · '), cell: (r) => [r.name, r.shoot ? h('div', { class: 'none' }, r.shoot) : null,
         r.openPath ? h('div', {}, h('button', { class: 'link', onclick: () => openFile(r.openPath) }, 'Open')) : null] },
@@ -837,6 +946,9 @@ function settingsView() {
       h('div', { class: 'row actions' },
         h('button', { class: 'btn primary', onclick: async () => { state.settings = await api.invoke('settings:set', { lightroomOriginals: lr.value.trim() }); renderMain(); } }, 'Save'))
     ),
+    h('h2', { class: 'section' }, 'Import profiles'),
+    h('p', { class: 'hint' }, 'A profile is a set of destinations and a folder-name pattern. While reviewing a card, put files in a profile with a shoot name, then import every group in one go.'),
+    profilesEditor(),
     h('h2', { class: 'section' }, 'What counts as safe'),
     h('div', { class: 'card-box' }, state.safeRules ? safeRulesControls(state.safeRules, saveRules) : 'Loading'),
     h('h2', { class: 'section' }, 'CardMap\'s data'),
@@ -1334,7 +1446,8 @@ api.on('cardbg', async (p) => {
     const x = p.result;
     if (viewing && x && (x.hashed || x.matched)) {
       state.lastResult = { info: `Checksums read for ${x.hashed.toLocaleString()} file${x.hashed === 1 ? '' : 's'} on this card${x.cancelled ? ' before it was stopped' : x.removed ? ' before it was taken out' : ''}.`
-        + (x.filesWithCopies ? ` ${x.filesWithCopies} have a copy in the library index${x.matched ? ` (${x.matched} newly recorded)` : ''}.` : '') };
+        + (x.filesWithCopies ? ` ${x.filesWithCopies} have a copy in the library index${x.matched ? ` (${x.matched} newly recorded)` : ''}.` : '')
+        + (x.lightroom && x.lightroom.found ? ` ${x.lightroom.found} are in Lightroom.` : '') };
     }
     if (viewing) {
       await refreshSummary();
@@ -1378,7 +1491,12 @@ api.on('job', async (p) => {
   if (p.done) {
     state.job = null;
     if (!p.silent || p.error) state.lastResult = p;
-    if (p.kind === 'import' && !p.error && state.form.thenLightroom && state.view === 'card') state.drawer = 'lightroom';
+    if (p.kind === 'import' && !p.error) {
+      state.lrSources = null; // counts changed
+      state.groups = null;
+      state.form.lrSource = 'lastImport';
+      if ((state.form.thenLightroom || (p.result && p.result.lightroom)) && state.view === 'card') state.drawer = 'lightroom';
+    }
     await refreshSummary();
     if (state.view === 'map') await loadMap();
     if (state.view === 'lightroom') await Promise.all([loadLightroom(), loadEdits()]);

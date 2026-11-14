@@ -137,8 +137,15 @@ function cardFolder(relPath) {
   return d === '.' ? '(card root)' : d;
 }
 
-/** Predicate for the files a job should cover: by capture dates, by card folders, or everything. */
+/**
+ * Predicate for the files a job should cover: by file ids, by capture dates, by card
+ * folders, or everything (null).
+ */
 function pickFiles(opts) {
+  if (Array.isArray(opts.fileIds)) {
+    const ids = new Set(opts.fileIds);
+    return (f) => ids.has(f.id);
+  }
   const dates = opts.dates && opts.dates.length ? new Set(opts.dates) : null;
   const folders = opts.folders && opts.folders.length ? new Set(opts.folders) : null;
   if (!dates && !folders) return null;

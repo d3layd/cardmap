@@ -61,9 +61,20 @@ function freeBytes(dir) {
   }
 }
 
-function folderFor(date, shoot) {
+/**
+ * The folder a file goes in under each destination. pattern (a profile setting) can use
+ * {date} {year} {month} {day} {shoot}; "\\" makes subfolders. Default: "{date} {shoot}".
+ */
+function folderFor(date, shoot, pattern) {
   const s = sanitizeName(shoot);
-  return s ? `${date} ${s}` : date;
+  if (!pattern) return s ? `${date} ${s}` : date;
+  const [year, month, day] = String(date).split('-');
+  const parts = String(pattern)
+    .replace(/\{(date|year|month|day|shoot)\}/g, (_m, k) => ({ date, year, month, day, shoot: s })[k] || '')
+    .split(/[\\/]+/)
+    .map((p) => sanitizeName(p.replace(/\s+/g, ' ').trim()))
+    .filter(Boolean);
+  return parts.length ? path.join(...parts) : date;
 }
 
 /**
@@ -71,7 +82,7 @@ function folderFor(date, shoot) {
  * Every copy is re-read from the destination and compared to the card file's
  * checksum before it is recorded. The card is only ever read.
  *
- * opts: { cardId, letter, dates[], shoot, dest, backup, extra[], maxFiles, onlyReady }
+ * opts: { cardId, letter, dates[] | folders[] | fileIds[], shoot, dest, backup, extra[], folderPattern, maxFiles, onlyReady }
  * extra: any number of further folders that each get a verified copy too.
  * Files marked "skip" are never copied; with onlyReady only files marked "ready" are.
  */
@@ -113,9 +124,10 @@ async function runImport(db, opts, job, emit) {
   let bytesTotal = 0;
   for (const f of files) {
     // An extra destination is done only when the file has a copy inside that folder;
-    // the main copy and the backup are done when the file has one anywhere.
+    // the main copy and the backup are done when the file has one anywhere, unless
+    // perFolder is set (a group import: each profile's folders must get their copy).
     const need = roots.filter((r) => !locStmt.all(f.id, r.kind).some((l) =>
-      pathExists(l.path, l.vol) && (r.kind !== 'extra' || l.path.toLowerCase().startsWith(`${norm(r.root)}\\`))));
+      pathExists(l.path, l.vol) && (r.kind !== 'extra' && !opts.perFolder || l.path.toLowerCase().startsWith(`${norm(r.root)}\\`))));
     if (need.length) bytesTotal += f.size;
     work.push({ f, need });
   }
@@ -163,7 +175,7 @@ async function runImport(db, opts, job, emit) {
       let sha = f.sha256;
       let todo = [];
       for (const r of need) {
-        const dir = path.join(r.root, folderFor(f.capture_date, shoot));
+        const dir = path.join(r.root, folderFor(f.capture_date, shoot, opts.folderPattern));
         await fs.promises.mkdir(dir, { recursive: true });
         const final = path.join(dir, f.name);
         // A file of the same name and size is already there, and we know the card

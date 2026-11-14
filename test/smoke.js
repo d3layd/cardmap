@@ -11,7 +11,7 @@ const { scanCard, cardSummary } = require('../core/cards');
 // two-copies rule can be exercised.
 const eachFolder = { diskOf: (p) => require('node:path').dirname(require('node:path').dirname(p)) };
 const { runImport } = require('../core/importer');
-const { setMarks, cardLog } = require('../core/marks');
+const { setMarks, setGroup, cardGroups, cardLog } = require('../core/marks');
 const { findOriginalsRoots, runLightroomCheck } = require('../core/lightroom');
 const { runFolderScan } = require('../core/folderscan');
 const { overview, listFiles } = require('../core/library');
@@ -219,6 +219,22 @@ const { inventory, hashPending, matchCards, indexStatus } = require('../core/lib
     assert.strictEqual(again.copied, 0);
     assert.strictEqual(again.skipped, 1);
     console.log('import to 2 extra folders:', JSON.stringify({ copied: rx.copied, rerunSkipped: again.skipped }));
+  }
+  // Import groups: two files sent to two profiles, each imported with its own folder pattern.
+  {
+    const [g1, g2] = byDate.slice(0, 2);
+    setGroup(db, cardId, [g1.id], 'Client', 'Shoot A');
+    setGroup(db, cardId, [g2.id], 'Personal', '');
+    const groups = cardGroups(db, cardId);
+    assert.deepStrictEqual(groups.map((g) => [g.profile, g.shoot, g.files]), [['Client', 'Shoot A', 1], ['Personal', '', 1]]);
+    assert.strictEqual(db.prepare('SELECT mark FROM files WHERE id = ?').get(g1.id).mark, 'ready');
+    const ra = await runImport(db, { cardId, letter: drive.letter, fileIds: groups[0].fileIds, shoot: 'Shoot A', dest: path.join(work, 'client'), folderPattern: '{year}\\{shoot}', perFolder: true }, job, () => {});
+    assert.strictEqual(ra.copied + ra.skipped, 1);
+    const year = g1.date.slice(0, 4);
+    assert(fs.existsSync(path.join(work, 'client', year, 'Shoot A', g1.name)), 'pattern folder');
+    setGroup(db, cardId, [g1.id, g2.id], null, '');
+    assert.strictEqual(cardGroups(db, cardId).length, 0);
+    console.log('import groups: 2 groups, pattern {year}\\{shoot} OK');
   }
   assert.strictEqual(r5.copied + r5.skipped, 1);
   // Marks: a file marked skip is never imported; with onlyReady only ready files are.

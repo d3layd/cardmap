@@ -85,6 +85,10 @@ function openDb(file) {
   if (!db.prepare('PRAGMA table_info(files)').all().some((c) => c.name === 'mark')) {
     db.exec('ALTER TABLE files ADD COLUMN mark TEXT');
   }
+  // Import group: the profile a file is to be imported with, and its shoot name.
+  if (!db.prepare('PRAGMA table_info(files)').all().some((c) => c.name === 'grp')) {
+    db.exec('ALTER TABLE files ADD COLUMN grp TEXT; ALTER TABLE files ADD COLUMN grp_shoot TEXT;');
+  }
   // What happened to a card's files, newest last: marks changed and imports run.
   db.exec(`CREATE TABLE IF NOT EXISTS card_log (
              id INTEGER PRIMARY KEY, at TEXT NOT NULL, card_id INTEGER NOT NULL, file_id INTEGER,

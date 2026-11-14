@@ -99,8 +99,8 @@ const { librarySig, saveReport, loadReport, snapshot, snapshots } = require('./c
 const { setVolumes, syncDb, pin, currentPath, online, pathExists } = require('./core/volumes');
 const { scanCard, cardSummary } = require('./core/cards');
 const { runImport } = require('./core/importer');
-const { setMarks, cardLog } = require('./core/marks');
-const { findOriginalsRoots, runLightroomCheck } = require('./core/lightroom');
+const { setMarks, setGroup, cardGroups, cardLog } = require('./core/marks');
+const { findOriginalsRoots, runLightroomCheck, matchLightroomCache } = require('./core/lightroom');
 const { runFolderScan, inventory, hashPending, hashCard, applyChanges, indexStatus, discover, foundFolders, foundPrefixes, dropScanned, dropWholeDrive } = require('./core/libindex');
 const { describeRules, prefixList, cleanPrefix, learnPrefixes, classify, RAW, STILL, VIDEO } = require('./core/discover');
 const { overview, listFiles } = require('./core/library');
@@ -282,9 +282,70 @@ function registerIpc() {
       destPin: opts.dest ? JSON.stringify(pin(opts.dest)) : '', backupPin: opts.backup ? JSON.stringify(pin(opts.backup)) : '',
       extraPins: JSON.stringify((opts.extra || []).filter(Boolean).map((p) => pin(p))),
     });
+    lastImportIds.delete(opts.cardId); // a plain import: "last import" is that one
     return startJob('import', (j, emit) => runImport(db, { ...opts, letter: drive.letter }, j, emit));
   });
 
+  // ----- Import profiles and groups -----
+  // A profile: { name, dest, backup, extra[], folderPattern, shoot (default shoot name),
+  // lightroom (open Add to Lightroom afterwards) }. Folders are pinned to their drive.
+  const readProfiles = () => {
+    try {
+      return JSON.parse(getSettings(db).importProfiles || '[]').map((p) => ({
+        ...p,
+        dest: currentPath(p.destPin) || p.dest || '',
+        backup: currentPath(p.backupPin) || p.backup || '',
+        extra: (p.extraPins || []).map((x) => currentPath(x)).filter(Boolean),
+      }));
+    } catch {
+      return [];
+    }
+  };
+  ipcMain.handle('profiles:get', () => readProfiles());
+  ipcMain.handle('profiles:save', (_e, list) => {
+    const clean = (list || []).filter((p) => p && String(p.name || '').trim()).map((p) => ({
+      name: String(p.name).trim(),
+      dest: p.dest || '', destPin: p.dest ? pin(p.dest) : null,
+      backup: p.backup || '', backupPin: p.backup ? pin(p.backup) : null,
+      extraPins: (p.extra || []).filter(Boolean).map((x) => pin(x)),
+      folderPattern: p.folderPattern || '', shoot: p.shoot || '', lightroom: Boolean(p.lightroom),
+    }));
+    setSettings(db, { importProfiles: JSON.stringify(clean) });
+    return readProfiles();
+  });
+  ipcMain.handle('groups:set', (_e, { cardId, fileIds, profile, shoot }) => setGroup(db, cardId, fileIds || [], profile, shoot));
+  ipcMain.handle('groups:get', (_e, cardId) => cardGroups(db, cardId).map((g) => ({ ...g, fileIds: undefined })));
+
+  // Import every group on a card, each with its own profile, one after another.
+  ipcMain.handle('import:groups', (_e, { cardId }) => {
+    const drive = driveFor(cardId);
+    if (!drive) throw new Error('Insert the card to import from it.');
+    const profiles = new Map(readProfiles().map((p) => [p.name, p]));
+    const groups = cardGroups(db, cardId);
+    if (!groups.length) throw new Error('No files on this card are in a group yet.');
+    const missing = [...new Set(groups.filter((g) => !profiles.get(g.profile) || !profiles.get(g.profile).dest).map((g) => g.profile))];
+    if (missing.length) throw new Error(`These profiles have no "Copy to" folder: ${missing.join(', ')}. Set one in Settings.`);
+    return startJob('import', async (j, emit) => {
+      const total = { copied: 0, skipped: 0, failed: 0, bytes: 0, errors: [], groups: [], importIds: [], lightroom: false };
+      for (const [i, g] of groups.entries()) {
+        if (j.cancelled) { total.cancelled = true; break; }
+        const p = profiles.get(g.profile);
+        const tag = `${g.profile}${g.shoot ? `: ${g.shoot}` : ''} (group ${i + 1} of ${groups.length})`;
+        const r = await runImport(db, {
+          cardId, letter: drive.letter, fileIds: g.fileIds, shoot: g.shoot || p.shoot || '',
+          dest: p.dest, backup: p.backup, extra: p.extra, folderPattern: p.folderPattern, perFolder: true,
+        }, j, (x) => emit({ ...x, label: `${tag}: ${x.label || ''}` }));
+        for (const k of ['copied', 'skipped', 'failed', 'bytes']) total[k] += r[k] || 0;
+        total.errors.push(...(r.errors || []));
+        total.importIds.push(r.importId);
+        total.groups.push({ profile: g.profile, shoot: g.shoot, copied: r.copied, skipped: r.skipped, failed: r.failed });
+        if (p.lightroom) total.lightroom = true;
+        if (r.cancelled) { total.cancelled = true; break; }
+      }
+      lastImportIds.set(cardId, total.importIds);
+      return total;
+    });
+  });
   // Mark card files ready or skip (mark null clears it), and read a card's log.
   ipcMain.handle('marks:set', (_e, { cardId, fileIds, mark }) => setMarks(db, cardId, fileIds || [], mark));
   ipcMain.handle('card:log', (_e, cardId) => cardLog(db, cardId));
@@ -292,7 +353,7 @@ function registerIpc() {
   ipcMain.handle('lightroom:start', (_e, opts) => {
     const drive = driveFor(opts.cardId);
     return startJob('lightroom', (j, emit) =>
-      runLightroomCheck(db, { ...opts, letter: drive?.letter ?? null, roots: lightroomRoots(), catalogs: findCatalogs('') }, j, emit)
+      runLightroomCheck(db, { ...lrPick(opts), letter: drive?.letter ?? null, roots: lightroomRoots(), catalogs: findCatalogs('') }, j, emit)
     );
   });
 
@@ -625,6 +686,8 @@ function registerIpc() {
       present.set(cardId, presentIds);
       entry.cardId = cardId;
       out = { result: await hashCard(db, { cardId, letter: drive.letter, shouldPause: () => Boolean(job) }, j, emit) };
+      // The library index is matched as each checksum is read; Lightroom from its cached catalog now.
+      out.result.lightroom = matchLightroomCache(db, cardId);
     } catch (e) {
       out = { error: e.message };
     }
@@ -827,7 +890,28 @@ function registerIpc() {
 
   // Files in the chosen dates/folders that are not yet recorded as being in Lightroom,
   // each as the best path to hand over: a copy on disk if there is one, else the card.
-  const notInLightroom = (q) => {
+  // Which card files a Lightroom step covers. q.source: 'ready' (files marked Ready),
+  // 'lastImport' (files copied by the card's latest import), or dates/folders as before.
+  const lastImportIds = new Map(); // cardId -> import ids of the latest group import
+  const lastImportId = (cardId) => (db.prepare('SELECT max(id) AS id FROM imports WHERE card_id = ?').get(cardId) || {}).id;
+  const lrPick = (q) => {
+    if (q.source === 'ready') {
+      return { ...q, fileIds: db.prepare("SELECT id FROM files WHERE card_id = ? AND mark = 'ready'").all(q.cardId).map((r) => r.id) };
+    }
+    if (q.source === 'lastImport') {
+      const ids = lastImportIds.get(q.cardId) || [lastImportId(q.cardId)].filter(Boolean);
+      const of = db.prepare('SELECT DISTINCT file_id AS id FROM locations WHERE import_id = ?');
+      return { ...q, fileIds: [...new Set(ids.flatMap((id) => of.all(id).map((r) => r.id)))] };
+    }
+    return q;
+  };
+  // How many files each choice covers, for the Add to Lightroom panel.
+  ipcMain.handle('lightroom:sources', (_e, cardId) => ({
+    ready: db.prepare("SELECT count(*) AS n FROM files WHERE card_id = ? AND mark = 'ready'").get(cardId).n,
+    lastImport: lrPick({ cardId, source: 'lastImport' }).fileIds.length,
+  }));
+  const notInLightroom = (q0) => {
+    const q = lrPick(q0);
     const drive = driveFor(q.cardId);
     const pick = pickFiles(q);
     const inLr = db.prepare("SELECT 1 AS x FROM locations WHERE file_id = ? AND kind = 'lightroom' AND verified = 1");
