@@ -213,6 +213,8 @@ function resultNotice() {
   let text = 'Done.';
   if (r.kind === 'import') {
     text = `${x.cancelled ? 'Import cancelled' : 'Import finished'}: ${x.copied} copied and verified, ${x.skipped} already in place, ${x.failed} failed.`;
+    const lo = x.leftOut || {};
+    if (lo.skip || lo.unready) text += ` Left out: ${[lo.skip ? `${lo.skip} marked skip` : '', lo.unready ? `${lo.unready} not marked ready` : ''].filter(Boolean).join(', ')}.`;
   } else if (r.kind === 'lightroom') {
     text = `Lightroom check${x.cancelled ? ' cancelled' : ''}: ${x.found} of ${x.checked} files are in the Lightroom library, ${x.notFound} are not.`;
     if (x.notUploaded) text += ` ${x.notUploaded} are in the catalog but their upload is not confirmed.`;
@@ -301,6 +303,12 @@ function importPanel(s, rows, keys, unit) {
   const count = chosen.reduce((n, g) => n + g.count, 0);
   const size = chosen.reduce((n, g) => n + g.bytes, 0);
   const todo = chosen.reduce((n, g) => n + (g.count - g.copied), 0);
+  const ready = chosen.reduce((n, g) => n + g.ready, 0);
+  const skip = chosen.reduce((n, g) => n + g.skip, 0);
+  // With files marked ready, import only those unless the box is unticked.
+  const onlyReady = ready > 0 && state.form.onlyReady !== false;
+  const marked = ready > 0 || skip > 0;
+  const eligible = onlyReady ? ready : count - skip;
   const pick = keys.length ? (unit === 'date' ? { dates: keys } : { folders: keys }) : { dates: s.groups.map((g) => g.key) };
   // Dates the chosen rows cover, for the folder preview. Known exactly when grouped by date.
   const dates = unit === 'date' ? chosen.map((g) => g.key) : keys.length ? null : s.groups.map((g) => g.key);
@@ -340,7 +348,11 @@ function importPanel(s, rows, keys, unit) {
     h('div', { class: 'what' },
       h('strong', {}, keys.length ? `${keys.length} selected ${unit}${keys.length === 1 ? '' : 's'}` : 'The whole card'),
       h('div', { class: 'none' }, `${count} files, ${bytes(size)}. ${todo === 0 ? 'All of them are already copied.' : todo === count ? 'None copied yet.' : `${count - todo} already copied, ${todo} still to copy.`}`),
-      keys.length ? null : h('div', { class: 'none' }, 'To copy only part of the card, tick rows in the table.')),
+      keys.length ? null : h('div', { class: 'none' }, 'To copy only part of the card, tick rows in the table, or open a date or folder and mark files ready or skip.'),
+      skip ? h('div', { class: 'none' }, `${skip} file${skip === 1 ? '' : 's'} marked skip will be left out.`) : null,
+      ready ? h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: onlyReady,
+        onchange: (e) => { state.form.onlyReady = e.target.checked; renderMain(); } }),
+        ` Only copy the ${ready} file${ready === 1 ? '' : 's'} marked ready`) : null),
 
     h('h3', {}, h('span', { class: 'step' }, '2'), 'Where it goes'),
     h('div', { class: 'field' }, h('label', {}, 'Shoot name (optional, added to each folder name)'),
@@ -355,9 +367,32 @@ function importPanel(s, rows, keys, unit) {
       h('li', {}, 'Every copy is read back and compared with the card. Only matching copies are recorded.'),
       h('li', {}, 'Files that are already copied are skipped, so it is safe to run again.'),
       h('li', {}, 'Nothing on the card is changed or deleted.')),
-    h('button', { class: 'btn primary wide', disabled: busy() || !count,
-      onclick: () => run('import:start', { cardId: s.card.id, ...pick, shoot: state.form.shoot.trim(), dest: state.form.dest, backup: state.form.backup }) },
-      todo === 0 ? `Check ${count} files again` : `Copy and verify ${todo} file${todo === 1 ? '' : 's'}`));
+    h('button', { class: 'btn primary wide', disabled: busy() || !eligible,
+      onclick: () => run('import:start', { cardId: s.card.id, ...pick, onlyReady, shoot: state.form.shoot.trim(), dest: state.form.dest, backup: state.form.backup }) },
+      !eligible ? (onlyReady ? 'No files marked ready' : 'Every file here is marked skip')
+        : marked ? `Import ${eligible} file${eligible === 1 ? '' : 's'}`
+        : todo === 0 ? `Check ${count} files again` : `Copy and verify ${todo} file${todo === 1 ? '' : 's'}`));
+}
+
+const markText = (g) => [g.ready ? `${g.ready} ready` : '', g.skip ? `${g.skip} skip` : ''].filter(Boolean).join(', ');
+const MARK_LOG = { ready: 'Marked ready', skip: 'Marked skip', clear: 'Mark cleared', import: 'Import' };
+
+/** The card's log: every mark change and import, newest first. */
+function logPanel(s) {
+  const box = h('div', {}, h('div', { class: 'none' }, 'Loading'));
+  api.invoke('card:log', s.card.id).then((rows) => {
+    box.replaceChildren(grid('cardlog', [
+      { label: 'When', cls: 'date', value: (r) => r.at, cell: (r) => dateTime(Date.parse(r.at)) },
+      { label: 'What', value: (r) => r.action, cell: (r) => MARK_LOG[r.action] || r.action },
+      { label: 'File', value: (r) => r.name || '', cell: (r) => r.name || '' },
+      { label: 'Details', value: (r) => r.detail || '', cell: (r) => r.detail || '' },
+    ], rows, { name: `${cardName(s.card)} log`, empty: 'Nothing logged yet. Marking files and importing are recorded here.' }));
+  });
+  return h('aside', { class: 'drawer wide', 'aria-label': 'Log' },
+    h('div', { class: 'row' }, h('h2', {}, 'Log'), h('span', { class: 'spacer' }),
+      h('button', { class: 'btn', onclick: () => { state.drawer = null; renderMain(); } }, 'Close')),
+    h('p', { class: 'none' }, 'Files marked ready or skip, and each import from this card.'),
+    box);
 }
 
 /** The "Find local copies" panel: match this card's files against the library index. */
@@ -513,7 +548,10 @@ function cardView() {
     ? h('span', { class: 'badge' }, 'Not connected')
     : s.safeToFormat
       ? h('span', { class: 'badge good' }, 'Safe to format')
-      : h('span', { class: 'badge warn' }, `Not safe to format: ${t.count - t.safe} files have fewer than 2 verified copies`);
+      : s.safeExceptSkipped
+        ? h('span', { class: 'badge warn', title: 'Every file you did not mark skip has 2 or more verified copies. Formatting loses the skipped ones.' },
+            `Safe to format, apart from ${t.skip - t.skipSafe} file${t.skip - t.skipSafe === 1 ? '' : 's'} marked skip`)
+        : h('span', { class: 'badge warn' }, `Not safe to format: ${t.count - t.safe} files have fewer than 2 verified copies`);
 
   const setGroup = (g) => { state.groupBy = g; defaultSelection(); renderMain(); };
 
@@ -542,6 +580,8 @@ function cardView() {
         onclick: () => { state.drawer = state.drawer === 'local' ? null : 'local'; renderMain(); } }, 'Find local copies'),
       h('button', { class: 'btn', 'aria-expanded': String(state.drawer === 'lightroom'),
         onclick: () => { state.drawer = state.drawer === 'lightroom' ? null : 'lightroom'; renderMain(); } }, `Add to Lightroom${sel}`),
+      h('button', { class: 'btn', 'aria-expanded': String(state.drawer === 'log'),
+        onclick: () => { state.drawer = state.drawer === 'log' ? null : 'log'; renderMain(); } }, 'Log'),
       s.mounted ? h('button', { class: `btn primary`, 'aria-expanded': String(state.drawer === 'import'),
         onclick: () => { state.drawer = state.drawer === 'import' ? null : 'import'; renderMain(); } }, `Import${sel}`) : null),
     grid(`card-${unit}`, [
@@ -559,8 +599,10 @@ function cardView() {
       { label: 'Copied', num: true, value: (g) => g.copied, text: (g) => `${g.copied} of ${g.count}`, cell: (g) => tally(g.copied, g.count) },
       { label: 'In Lightroom', num: true, value: (g) => g.lightroom, text: (g) => `${g.lightroom} of ${g.count}`, cell: (g) => tally(g.lightroom, g.count) },
       { label: '2+ verified copies', num: true, value: (g) => g.safe, text: (g) => `${g.safe} of ${g.count}`, cell: (g) => tally(g.safe, g.count) },
+      { label: 'Marked', value: (g) => g.ready * 1e6 + g.skip, text: (g) => markText(g), cell: (g) => (g.ready || g.skip ? markText(g) : h('span', { class: 'none' }, '')) },
     ], rows, { name: `${cardName(s.card)} by ${unit}` }),
   ]), s.mounted && state.drawer === 'import' ? importPanel(s, rows, keys, unit)
+    : state.drawer === 'log' ? logPanel(s)
     : state.drawer === 'lightroom' ? lightroomPanel(s, rows, keys, unit)
     : state.drawer === 'local' ? localPanel(s) : null)];
 }
@@ -569,12 +611,36 @@ function filesView() {
   const f = state.files;
   const rows = f.rows;
   const total = rows ? rows.reduce((n, r) => n + r.size, 0) : 0;
+  // Card files can be marked ready (import it) or skip (leave it out of imports).
+  const cardId = f.query.cardId;
+  const setMark = async (list, mark) => {
+    if (!list.length) return;
+    await api.invoke('marks:set', { cardId, fileIds: list.map((r) => r.id), mark });
+    for (const r of list) r.mark = mark;
+    await refreshSummary();
+    renderMain();
+  };
+  const markBtn = (r, mark, label) => h('button', { class: `btn${r.mark === mark ? ' on' : ''}`, 'aria-pressed': String(r.mark === mark),
+    title: r.mark === mark ? 'Click again to clear the mark' : null,
+    onclick: () => setMark([r], r.mark === mark ? null : mark) }, label);
+  const markCol = cardId ? [{ label: 'Mark', value: (r) => r.mark || '', text: (r) => r.mark || '', csv: true,
+    cell: (r) => h('div', { class: 'seg', role: 'group', 'aria-label': `Mark ${r.name}` }, markBtn(r, 'ready', 'Ready'), markBtn(r, 'skip', 'Skip')) }] : [];
+  const ready = rows ? rows.filter((r) => r.mark === 'ready').length : 0;
+  const skip = rows ? rows.filter((r) => r.mark === 'skip').length : 0;
   return [
     h('div', { class: 'row' },
       h('button', { class: 'btn', onclick: async () => { state.view = f.back; if (f.back === 'map') await loadMap(); render(); } }, 'Back'),
       h('h1', {}, f.title)),
     h('p', { class: 'lede' }, rows ? `${rows.length} file${rows.length === 1 ? '' : 's'}, ${bytes(total)}. ${f.sub || ''}` : 'Loading'),
+    rows && cardId ? h('div', { class: 'row toolbar' },
+      h('span', { class: 'none' }, ready || skip ? `${markText({ ready, skip })}. ` : 'Mark files Ready to import only those, or Skip to leave them out.'),
+      h('span', { class: 'spacer' }),
+      h('span', { class: 'none' }, 'All shown:'),
+      h('button', { class: 'btn', onclick: () => setMark(gridVisible('files', rows), 'ready') }, 'Ready'),
+      h('button', { class: 'btn', onclick: () => setMark(gridVisible('files', rows), 'skip') }, 'Skip'),
+      h('button', { class: 'btn', onclick: () => setMark(gridVisible('files', rows).filter((r) => r.mark), null) }, 'Clear')) : null,
     rows && grid('files', [
+      ...markCol,
       { label: 'Preview', sort: false, csv: false, cls: 'thumbcell', cell: (r) => thumb(r) },
       { label: 'File', value: (r) => r.name, text: (r) => [r.name, r.shoot].filter(Boolean).join(' · '), cell: (r) => [r.name, r.shoot ? h('div', { class: 'none' }, r.shoot) : null,
         r.openPath ? h('div', {}, h('button', { class: 'link', onclick: () => openFile(r.openPath) }, 'Open')) : null] },

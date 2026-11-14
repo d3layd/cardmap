@@ -51,7 +51,7 @@ async function scanCard(db, drive, job, emit) {
 function cardSummary(db, cardId, presentIds) {
   const card = db.prepare('SELECT * FROM cards WHERE id = ?').get(cardId);
   if (!card) return null;
-  let files = db.prepare('SELECT id, rel_path, size, capture_date, shoot FROM files WHERE card_id = ?').all(cardId);
+  let files = db.prepare('SELECT id, rel_path, size, capture_date, shoot, mark FROM files WHERE card_id = ?').all(cardId);
   if (presentIds) {
     const set = new Set(presentIds);
     files = files.filter((f) => set.has(f.id));
@@ -70,12 +70,12 @@ function cardSummary(db, cardId, presentIds) {
   // The same files grouped two ways: by capture date and by folder on the card.
   const byDate = new Map();
   const byFolder = new Map();
-  const blank = (key) => ({ key, count: 0, bytes: 0, copied: 0, lightroom: 0, safe: 0, shoots: new Set(), dates: new Set() });
+  const blank = (key) => ({ key, count: 0, bytes: 0, copied: 0, lightroom: 0, safe: 0, ready: 0, skip: 0, skipSafe: 0, shoots: new Set(), dates: new Set() });
   const bucket = (map, key) => {
     if (!map.has(key)) map.set(key, blank(key));
     return map.get(key);
   };
-  const totals = { count: 0, bytes: 0, copied: 0, lightroom: 0, safe: 0 };
+  const totals = { count: 0, bytes: 0, copied: 0, lightroom: 0, safe: 0, ready: 0, skip: 0, skipSafe: 0 };
   for (const f of files) {
     const g = bucket(byDate, f.capture_date);
     const d = bucket(byFolder, cardFolder(f.rel_path));
@@ -89,6 +89,9 @@ function cardSummary(db, cardId, presentIds) {
       if (copied) t.copied += 1;
       if (lr) t.lightroom += 1;
       if (safe) t.safe += 1;
+      if (f.mark === 'ready') t.ready += 1;
+      if (f.mark === 'skip') t.skip += 1;
+      if (f.mark === 'skip' && safe) t.skipSafe += 1;
     }
     for (const t of [g, d]) {
       if (f.shoot) t.shoots.add(f.shoot);
@@ -107,6 +110,8 @@ function cardSummary(db, cardId, presentIds) {
     card,
     totals,
     safeToFormat: totals.count > 0 && totals.safe === totals.count,
+    // Every file not marked skip has 2+ verified copies; the skipped ones would be lost.
+    safeExceptSkipped: totals.count > 0 && totals.skip > totals.skipSafe && totals.safe - totals.skipSafe === totals.count - totals.skip,
     groups: out(byDate, true),
     folders: out(byFolder, false),
   };

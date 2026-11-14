@@ -81,6 +81,15 @@ function openDb(file) {
   }
   db.exec(`CREATE TABLE IF NOT EXISTS volumes (serial TEXT PRIMARY KEY, label TEXT, last_letter TEXT, last_seen TEXT);
            CREATE INDEX IF NOT EXISTS locations_vol ON locations (vol);`);
+  // A mark the user puts on a card file: 'ready' (import it) or 'skip' (leave it out).
+  if (!db.prepare('PRAGMA table_info(files)').all().some((c) => c.name === 'mark')) {
+    db.exec('ALTER TABLE files ADD COLUMN mark TEXT');
+  }
+  // What happened to a card's files, newest last: marks changed and imports run.
+  db.exec(`CREATE TABLE IF NOT EXISTS card_log (
+             id INTEGER PRIMARY KEY, at TEXT NOT NULL, card_id INTEGER NOT NULL, file_id INTEGER,
+             name TEXT, action TEXT NOT NULL, detail TEXT);
+           CREATE INDEX IF NOT EXISTS card_log_card ON card_log (card_id, at);`);
   return db;
 }
 

@@ -95,7 +95,7 @@ function listFiles(db, q) {
     .sort((a, b) => (a.rel_path < b.rel_path ? -1 : 1))
     .map((f) => ({
       id: f.id, name: f.name, relPath: f.rel_path, folder: cardFolder(f.rel_path), size: f.size, mtime: f.mtime_ms,
-      date: f.capture_date, shoot: f.shoot, sha256: f.sha256, cardId: f.card_id,
+      date: f.capture_date, shoot: f.shoot, sha256: f.sha256, cardId: f.card_id, mark: f.mark || null,
       locations: locs.all(f.id).map((l) => ({
         ...l,
         exists: exists(l.path, l.vol),

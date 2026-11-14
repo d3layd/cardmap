@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const { once } = require('node:events');
 const { addLocation } = require('./db');
 const { pathExists } = require('./volumes');
+const { logImport } = require('./marks');
 const { hashFile, nowIso, sanitizeName, throttle, pickFiles, Cancelled } = require('./util');
 
 const PART = '.cardmap-part';
@@ -70,7 +71,8 @@ function folderFor(date, shoot) {
  * Every copy is re-read from the destination and compared to the card file's
  * checksum before it is recorded. The card is only ever read.
  *
- * opts: { cardId, letter, dates[], shoot, dest, backup, maxFiles }
+ * opts: { cardId, letter, dates[], shoot, dest, backup, maxFiles, onlyReady }
+ * Files marked "skip" are never copied; with onlyReady only files marked "ready" are.
  */
 async function runImport(db, opts, job, emit) {
   const { cardId, letter, shoot, dest, backup } = opts;
@@ -88,6 +90,15 @@ async function runImport(db, opts, job, emit) {
     .prepare('SELECT * FROM files WHERE card_id = ? ORDER BY capture_date, rel_path')
     .all(cardId)
     .filter((f) => pick(f) && fs.existsSync(path.join(`${letter}\\`, f.rel_path)));
+  // Files marked "skip" are always left out; with onlyReady, so is anything not marked "ready".
+  const leftOut = { skip: 0, unready: 0 };
+  files = files.filter((f) => {
+    if (f.mark === 'skip') leftOut.skip += 1;
+    else if (opts.onlyReady && f.mark !== 'ready') leftOut.unready += 1;
+    else return true;
+    return false;
+  });
+  if (!files.length) throw new Error(opts.onlyReady ? 'No files in this selection are marked ready.' : 'Every file in this selection is marked skip.');
   if (opts.maxFiles) files = files.slice(0, opts.maxFiles);
 
   const locStmt = db.prepare('SELECT path, vol FROM locations WHERE file_id = ? AND kind = ? AND verified = 1');
@@ -214,6 +225,8 @@ async function runImport(db, opts, job, emit) {
     cancelled ? 'cancelled' : result.failed ? 'finished with errors' : 'finished',
     importId
   );
+  result.leftOut = leftOut;
+  logImport(db, cardId, result, leftOut);
   return result;
 }
 

@@ -63,6 +63,7 @@ const { buildReport, recheck } = require('./core/dupes');
 const { setVolumes, syncDb, pin, currentPath, online, pathExists } = require('./core/volumes');
 const { scanCard, cardSummary } = require('./core/cards');
 const { runImport } = require('./core/importer');
+const { setMarks, cardLog } = require('./core/marks');
 const { findOriginalsRoots, runLightroomCheck } = require('./core/lightroom');
 const { runFolderScan, inventory, hashPending, hashCard, applyChanges, indexStatus, discover, foundFolders, foundPrefixes, dropScanned, dropWholeDrive } = require('./core/libindex');
 const { describeRules, prefixList, cleanPrefix, learnPrefixes, classify, RAW, STILL, VIDEO } = require('./core/discover');
@@ -228,6 +229,10 @@ function registerIpc() {
     });
     return startJob('import', (j, emit) => runImport(db, { ...opts, letter: drive.letter }, j, emit));
   });
+
+  // Mark card files ready or skip (mark null clears it), and read a card's log.
+  ipcMain.handle('marks:set', (_e, { cardId, fileIds, mark }) => setMarks(db, cardId, fileIds || [], mark));
+  ipcMain.handle('card:log', (_e, cardId) => cardLog(db, cardId));
 
   ipcMain.handle('lightroom:start', (_e, opts) => {
     const drive = driveFor(opts.cardId);
@@ -713,7 +718,7 @@ function registerIpc() {
     const copies = db.prepare("SELECT path, vol FROM locations WHERE file_id = ? AND kind != 'lightroom' AND verified = 1");
     const out = [];
     for (const f of db.prepare('SELECT * FROM files WHERE card_id = ? ORDER BY capture_date, rel_path').all(q.cardId)) {
-      if ((pick && !pick(f)) || inLr.get(f.id)) continue;
+      if ((pick && !pick(f)) || f.mark === 'skip' || inLr.get(f.id)) continue;
       const copy = (copies.all(f.id).find((l) => pathExists(l.path, l.vol)) || {}).path;
       const onCard = drive ? path.join(`${drive.letter}\\`, f.rel_path) : null;
       const p = copy || (onCard && fs.existsSync(onCard) ? onCard : null);

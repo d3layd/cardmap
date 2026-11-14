@@ -8,6 +8,7 @@ const { openDb } = require('../core/db');
 const { listCardDrives } = require('../core/drives');
 const { scanCard, cardSummary } = require('../core/cards');
 const { runImport } = require('../core/importer');
+const { setMarks, cardLog } = require('../core/marks');
 const { findOriginalsRoots, runLightroomCheck } = require('../core/lightroom');
 const { runFolderScan } = require('../core/folderscan');
 const { overview, listFiles } = require('../core/library');
@@ -195,6 +196,26 @@ const { inventory, hashPending, matchCards, indexStatus } = require('../core/lib
   const r5 = await runImport(db, { cardId, letter: drive.letter, folders: [byDate[0].folder], shoot: '', dest: path.join(work, 'byfolder'), maxFiles: 1 }, job, () => {});
   console.log('import by folder:', JSON.stringify(r5));
   assert.strictEqual(r5.copied + r5.skipped, 1);
+  // Marks: a file marked skip is never imported; with onlyReady only ready files are.
+  if (byDate.length >= 2) {
+    const [a, b] = byDate;
+    assert.strictEqual(setMarks(db, cardId, [a.id], 'skip').changed, 1);
+    assert.strictEqual(setMarks(db, cardId, [b.id], 'ready').changed, 1);
+    assert.strictEqual(setMarks(db, cardId, [b.id], 'ready').changed, 0); // no change, not logged again
+    const r7 = await runImport(db, { cardId, letter: drive.letter, dates: [date], onlyReady: true, shoot: '', dest: path.join(work, 'ready') }, job, () => {});
+    console.log('import ready only:', JSON.stringify({ copied: r7.copied, skipped: r7.skipped, leftOut: r7.leftOut }));
+    assert.strictEqual(r7.copied + r7.skipped, 1);
+    assert.strictEqual(r7.leftOut.skip, 1);
+    assert.strictEqual(r7.leftOut.unready, byDate.length - 2);
+    const sm = cardSummary(db, cardId, presentIds);
+    assert.strictEqual(sm.totals.ready, 1);
+    assert.strictEqual(sm.totals.skip, 1);
+    const log = cardLog(db, cardId);
+    assert.deepStrictEqual(log.slice(0, 3).map((l) => l.action), ['import', 'ready', 'skip']); // earlier imports are logged too
+    setMarks(db, cardId, [a.id, b.id], null);
+    assert.strictEqual(cardLog(db, cardId)[0].action, 'clear');
+    await assert.rejects(runImport(db, { cardId, letter: drive.letter, dates: [date], onlyReady: true, shoot: '', dest: path.join(work, 'ready') }, job, () => {}), /marked ready/);
+  }
   assert(overview(db, 'Smoke').length >= 1);
   assert.strictEqual(overview(db, 'zzz-no-such-thing').length, 0);
   console.log('ALL OK');
