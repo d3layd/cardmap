@@ -13,6 +13,7 @@ A little tool I'm building to help with managing media: keeping track of my file
 - **Finds a file anywhere:** one search across cards, your folders and Lightroom, showing every place a file is.
 - **Shows duplicates** across your drives, and lists extra copies that are safe to delete: each file must stay in at least two places on different physical disks, and copies next to a video project are kept. It never deletes anything itself.
 - **Every table sorts, filters and exports to CSV.**
+- **Keeps itself up to date.** Checksums are read from a card in the background as soon as it is plugged in, and the library index refreshes itself when a drive is connected and every few hours. New drives are offered, not scanned without asking.
 
 ## Running it
 
