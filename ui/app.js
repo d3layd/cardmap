@@ -16,6 +16,8 @@ const state = {
   mapQuery: '',
   mapRows: null,
   files: null, // { title, sub, back, query, rows }
+  cardBg: {}, // card serial -> progress of its background checksum reading
+  newDrives: [], // connected drives not yet in the index or dismissed
 };
 
 // ---------- helpers ----------
@@ -161,7 +163,7 @@ function renderSidebar() {
     h('button', { class: `nav-item${state.view === 'lookup' ? ' active' : ''}`, onclick: () => show('lookup') }, h('span', { class: 'grow' }, 'Find a file')),
     h('button', { class: `nav-item${state.view === 'map' || (state.view === 'files' && state.files.back === 'map') ? ' active' : ''}`, onclick: () => show('map') }, h('span', { class: 'grow' }, 'Where things are')),
     h('button', { class: `nav-item${state.view === 'index' ? ' active' : ''}`, onclick: () => show('index') },
-      h('span', { class: 'grow' }, 'Library index', h('div', { class: 'sub', id: 'navbg' }, state.bg ? `Indexing${state.bg.bytesTotal ? ` ${Math.floor((state.bg.bytesDone / state.bg.bytesTotal) * 100)}%` : ''}` : ''))),
+      h('span', { class: 'grow' }, 'Library index', h('div', { class: 'sub', id: 'navbg' }, state.bg ? `Indexing${state.bg.bytesTotal ? ` ${Math.floor((state.bg.bytesDone / state.bg.bytesTotal) * 100)}%` : ''}` : state.newDrives.length ? `New drive connected` : ''))),
     h('button', { class: `nav-item${state.view === 'dupes' ? ' active' : ''}`, onclick: () => show('dupes') }, h('span', { class: 'grow' }, 'Duplicates')),
     h('button', { class: `nav-item${state.view === 'lightroom' ? ' active' : ''}`, onclick: () => show('lightroom') }, h('span', { class: 'grow' }, 'Lightroom library')),
     h('button', { class: `nav-item${state.view === 'settings' ? ' active' : ''}`, onclick: () => show('settings') }, h('span', { class: 'grow' }, 'Settings')),
@@ -507,6 +509,9 @@ function cardView() {
     h('p', { class: 'lede' }, `${t.count} photo and video files in ${s.folders.length} folder${s.folders.length === 1 ? '' : 's'}, ${bytes(t.bytes)}. Card ID ${s.card.serial}.`),
     drive ? usage(drive.size, drive.free, false) : s.card.size ? h('div', { class: 'usage' }, h('span', {}, `${bytes(s.card.size)} card`)) : null,
     resultNotice(),
+    s.mounted && state.cardBg[s.card.serial] ? h('div', { class: 'hint row' },
+      h('span', { id: 'cardbgline' }, cardBgLine(state.cardBg[s.card.serial])),
+      h('button', { class: 'link', title: 'Stop reading, for example to take the card out', onclick: () => api.invoke('cardbg:stop', s.card.serial) }, 'Stop')) : null,
     s.mounted ? null : h('div', { class: 'notice' }, 'This card is not connected. The table shows what was recorded when it was last read.'),
     h('div', { class: 'row toolbar' },
       h('span', { class: 'none' }, 'Group by'),
@@ -640,10 +645,23 @@ function settingsView() {
 }
 
 // ---------- library index ----------
+function autoToggle(key, text) {
+  return h('label', { class: 'check' },
+    h('input', { type: 'checkbox', checked: state.settings[key] !== '0', onchange: async (e) => {
+      state.settings = await api.invoke('settings:set', { [key]: e.target.checked ? '1' : '0' });
+    } }), text);
+}
+
 async function loadIndex() {
   [state.index, state.rules] = await Promise.all([api.invoke('index:status'), api.invoke('index:rules')]);
   state.libFolders = state.index.folders.map((f) => ({ path: f.path, exists: f.exists }));
   if (state.view === 'index') renderMain();
+}
+
+function cardBgLine(p) {
+  const size = p.bytesTotal ? ` · ${bytes(p.bytesDone || 0)} of ${bytes(p.bytesTotal)}` : '';
+  const count = p.filesTotal ? ` · file ${(p.filesDone || 0).toLocaleString()} of ${p.filesTotal.toLocaleString()}` : '';
+  return `${p.paused ? 'Checksums paused while another task runs' : 'Reading checksums from the card in the background'}${count}${size}. Press Stop before taking the card out.`;
 }
 
 function bgLine(p) {
@@ -733,6 +751,10 @@ function indexView() {
     h('h1', {}, 'Library index'),
     h('p', { class: 'lede' }, 'Finds the photos and video you imported from cameras, drones and phones, and saves a checksum for each. Once a file is indexed, matching it to a card is an instant lookup. Nothing on your drives is changed.'),
     resultNotice(),
+    state.newDrives.map((d) => h('div', { class: 'notice row' },
+      h('span', { class: 'grow' }, `New drive connected: ${d.letter} ${d.label || 'no name'}. Look through it for imported photos and video?`),
+      h('button', { class: 'btn primary', onclick: async () => { state.newDrives = await api.invoke('index:addDrive', d.serial); renderSidebar(); await loadIndex(); } }, 'Add to the index'),
+      h('button', { class: 'btn', onclick: async () => { state.newDrives = await api.invoke('index:dismissDrive', d.serial); renderSidebar(); await loadIndex(); } }, 'Not this one'))),
     h('div', { class: 'card-box' },
       !ix.files
         ? h('div', {}, 'Nothing found yet. Tick the drives to look through, then press "Scan for imported media".')
@@ -754,6 +776,11 @@ function indexView() {
                 onclick: async () => { await api.invoke('index:start'); await loadIndex(); } }, ix.hashed ? 'Continue indexing' : 'Start indexing'),
             ]),
       h('div', { class: 'hint' }, 'The scan takes a few minutes and runs in the background. Indexing reads each found file once, so the first pass can take many hours; it pauses by itself while an import or a check is running, carries on where it left off, and only re-reads a file if its size or date changes.')),
+
+    h('div', { class: 'row toolbar' }, h('strong', {}, 'Automatic')),
+    h('div', { class: 'checks stack' },
+      autoToggle('autoIndex', 'Keep the index up to date: scan for new folders and files, and read missing checksums, when CardMap opens, when one of these drives is connected, and every 6 hours.'),
+      autoToggle('autoCardChecksums', 'Read checksums from a card in the background as soon as it is plugged in, so its files can be matched and looked up.')),
 
     h('div', { class: 'row toolbar' }, h('strong', {}, 'Drives to scan')),
     ix.drives.length
@@ -988,6 +1015,36 @@ api.on('bg', async (p) => {
   if (first && state.view === 'index') loadIndex();
 });
 
+// Background checksum reading for a card that was just plugged in.
+api.on('cardbg', async (p) => {
+  const viewing = state.view === 'card' && state.summary && state.summary.card.serial === p.serial;
+  if (p.done) {
+    delete state.cardBg[p.serial];
+    const x = p.result;
+    if (viewing && x && (x.hashed || x.matched)) {
+      state.lastResult = { info: `Checksums read for ${x.hashed.toLocaleString()} file${x.hashed === 1 ? '' : 's'} on this card${x.cancelled ? ' before it was stopped' : x.removed ? ' before it was taken out' : ''}.`
+        + (x.filesWithCopies ? ` ${x.filesWithCopies} have a copy in the library index${x.matched ? ` (${x.matched} newly recorded)` : ''}.` : '') };
+    }
+    if (viewing) {
+      await refreshSummary();
+      renderMain();
+    }
+    return;
+  }
+  const first = !state.cardBg[p.serial];
+  state.cardBg[p.serial] = p;
+  const line = document.getElementById('cardbgline');
+  if (line && viewing) line.textContent = cardBgLine(p);
+  else if (first && viewing) renderMain();
+});
+
+// Drives that are connected but not yet in the index (or dismissed).
+api.on('drives', async ({ newDrives }) => {
+  state.newDrives = newDrives || [];
+  renderSidebar();
+  if (state.view === 'index') await loadIndex();
+});
+
 // A drive has come back under a different letter and its saved locations were updated.
 api.on('volumes', async ({ moved }) => {
   state.lastResult = { info: `A drive is connected under a different letter than before. ${moved} saved location${moved === 1 ? ' was' : 's were'} updated to the new letter.` };
@@ -1019,6 +1076,8 @@ api.on('job', async (p) => {
 
 (async () => {
   state.settings = await api.invoke('settings:get');
+  state.newDrives = await api.invoke('index:newDrives');
+  state.cardBg = await api.invoke('cardbg:status');
   state.form.dest = state.settings.dest || '';
   state.form.backup = state.settings.backup || '';
   await loadCards();

@@ -59,7 +59,7 @@ const { setVolumes, syncDb, pin, currentPath, online, pathExists } = require('./
 const { scanCard, cardSummary } = require('./core/cards');
 const { runImport } = require('./core/importer');
 const { findOriginalsRoots, runLightroomCheck } = require('./core/lightroom');
-const { runFolderScan, inventory, hashPending, indexStatus, discover, foundFolders, foundPrefixes, dropScanned, dropWholeDrive } = require('./core/libindex');
+const { runFolderScan, inventory, hashPending, hashCard, indexStatus, discover, foundFolders, foundPrefixes, dropScanned, dropWholeDrive } = require('./core/libindex');
 const { describeRules, prefixList, cleanPrefix } = require('./core/discover');
 const { overview, listFiles } = require('./core/library');
 
@@ -78,7 +78,13 @@ const send = (channel, payload) => {
 // The background indexer has its own slot, separate from the one-at-a-time task above.
 let bg = null;
 let bgProgress = null;
+let indexAgain = false;
+let userPaused = false; // Pause pressed: no automatic runs until Start is pressed again
+let scheduleIndex = () => {};
 let startIndexing = () => {};
+// Set up in registerIpc: what to do when drives or cards come and go.
+let onVolumesChanged = () => {};
+let onCardsAdded = () => {};
 
 let volumesNow = []; // every connected volume: { letter, serial, label }
 let volumeKey = null;
@@ -89,16 +95,23 @@ async function refreshDrives() {
     // recorded paths for that drive are rewritten to the new letter.
     const key = JSON.stringify(volumes.map((v) => [v.serial, v.letter]));
     if (key !== volumeKey) {
+      const before = new Set(volumesNow.map((v) => v.serial));
+      const first = volumeKey === null;
       volumeKey = key;
       volumesNow = volumes;
       setVolumes(volumes);
       const moved = syncDb(db, volumes);
       if (moved) send('volumes', { moved });
       wholeDrivesToScan();
+      onVolumesChanged(first ? [] : volumes.filter((v) => !before.has(v.serial)), first);
     }
     const changed = JSON.stringify(cards.map((d) => d.serial)) !== JSON.stringify(drives.map((d) => d.serial));
+    const had = new Set(drives.map((d) => d.serial));
     drives = cards;
-    if (changed) send('cards', cardList());
+    if (changed) {
+      send('cards', cardList());
+      onCardsAdded(cards.filter((d) => !had.has(d.serial)));
+    }
   } catch {
     /* keep the last known list */
   }
@@ -296,7 +309,10 @@ function registerIpc() {
     return rulesOut();
   });
 
-  ipcMain.handle('index:setDrives', (_e, serials) => setSettings(db, { indexDrives: JSON.stringify([...new Set(serials || [])]) }));
+  ipcMain.handle('index:setDrives', (_e, serials) => {
+    setSettings(db, { indexDrives: JSON.stringify([...new Set(serials || [])]) });
+    markKnown(serials || []);
+  });
   ipcMain.handle('index:exclude', (_e, folder) => {
     const pins = excludedPins().filter((p) => currentPath(p).toLowerCase() !== String(folder).toLowerCase());
     pins.push(pin(folder));
@@ -339,14 +355,100 @@ function registerIpc() {
       .then((out) => {
         bg = null;
         bgProgress = null;
+        if (indexAgain && !(out.result && out.result.cancelled)) {
+          indexAgain = false;
+          setTimeout(() => startIndexing(true), 2000);
+        }
         // Finished everything it could reach: nothing to resume next launch.
         if (out.result && !out.result.cancelled && !out.result.scanOnly) setSettings(db, { libIndexAuto: '' });
         send('bg', { done: true, ...out });
       });
   };
-  ipcMain.handle('index:start', () => startIndexing(true));
-  ipcMain.handle('index:scan', () => startIndexing(false));
+  ipcMain.handle('index:start', () => {
+    userPaused = false;
+    return startIndexing(true);
+  });
+
+  // ----- Keeping things up to date on their own -----
+  const autoOn = (key) => getSettings(db)[key] !== '0';
+  // Run the indexer now, or once more after the current run, to pick up new folders and
+  // files and read anything still without a checksum.
+  scheduleIndex = () => {
+    if (process.env.CARDMAP_SHOT || userPaused || !autoOn('autoIndex')) return;
+    if (!scanRoots().length && !onlineFolders().length) return;
+    if (bg) indexAgain = true;
+    else startIndexing(true);
+  };
+  // Drives CardMap has already asked about (or that were here before this feature).
+  const knownDrives = () => {
+    try {
+      return JSON.parse(getSettings(db).knownDrives || 'null');
+    } catch {
+      return null;
+    }
+  };
+  const newDrives = () => {
+    const known = new Set(knownDrives() || []);
+    const scanned = new Set(scanSerials());
+    return volumesNow.filter((v) => !cardSerials().has(v.serial) && !known.has(v.serial) && !scanned.has(v.serial));
+  };
+  const markKnown = (serials) => setSettings(db, { knownDrives: JSON.stringify([...new Set([...(knownDrives() || []), ...serials])]) });
+  onVolumesChanged = (added, first) => {
+    if (knownDrives() === null) markKnown(volumesNow.map((v) => v.serial)); // first run: only drives that turn up later count as new
+    if (first) return;
+    const folderVols = new Set(libraryFolders().length ? JSON.parse(getSettings(db).libraryFolders || '[]').map((p) => (typeof p === 'string' ? pin(p) : p).vol) : []);
+    if (added.some((v) => scanSerials().includes(v.serial) || folderVols.has(v.serial))) scheduleIndex();
+    send('drives', { newDrives: newDrives() });
+  };
+  ipcMain.handle('index:newDrives', () => newDrives());
+  ipcMain.handle('index:dismissDrive', (_e, serial) => {
+    markKnown([serial]);
+    return newDrives();
+  });
+  ipcMain.handle('index:addDrive', (_e, serial) => {
+    markKnown([serial]);
+    setSettings(db, { indexDrives: JSON.stringify([...new Set([...scanSerials(), serial])]) });
+    scheduleIndex();
+    return newDrives();
+  });
+
+  // Cards: as soon as one is plugged in, list it and read its checksums in the background,
+  // so its files can be matched and looked up without waiting. Stands aside for other tasks.
+  const cardBg = new Map(); // serial -> { job, progress }
+  const startCardBg = async (drive) => {
+    if (process.env.CARDMAP_SHOT || !autoOn('autoCardChecksums') || cardBg.has(drive.serial)) return;
+    const j = { cancelled: false };
+    const entry = { job: j, progress: { label: 'Listing the card' } };
+    cardBg.set(drive.serial, entry);
+    const emit = (p) => {
+      entry.progress = p;
+      send('cardbg', { serial: drive.serial, ...p });
+    };
+    let out;
+    try {
+      const { cardId, presentIds } = await scanCard(db, drive);
+      present.set(cardId, presentIds);
+      entry.cardId = cardId;
+      out = { result: await hashCard(db, { cardId, letter: drive.letter, shouldPause: () => Boolean(job) }, j, emit) };
+    } catch (e) {
+      out = { error: e.message };
+    }
+    cardBg.delete(drive.serial);
+    send('cardbg', { serial: drive.serial, cardId: entry.cardId, done: true, ...out });
+  };
+  onCardsAdded = (added) => added.forEach((d) => setTimeout(() => startCardBg(d), 1500));
+  ipcMain.handle('cardbg:status', () => Object.fromEntries([...cardBg].map(([k, v]) => [k, v.progress])));
+  ipcMain.handle('cardbg:stop', (_e, serial) => {
+    const e = cardBg.get(serial);
+    if (e) e.job.cancelled = true;
+  });
+  ipcMain.handle('index:scan', () => {
+    userPaused = false;
+    return startIndexing(false);
+  });
   ipcMain.handle('index:stop', () => {
+    userPaused = true;
+    indexAgain = false;
     setSettings(db, { libIndexAuto: '' });
     if (bg) bg.cancelled = true;
   });
@@ -522,6 +624,7 @@ function registerIpc() {
   ipcMain.handle('settings:get', settingsOut);
   ipcMain.handle('settings:set', (_e, obj) => {
     setSettings(db, obj);
+    if (obj && obj.autoIndex === '1') scheduleIndex();
     return settingsOut();
   });
 
@@ -601,10 +704,13 @@ app.whenReady().then(() => {
         /* another task started first; the next Lightroom check will refresh it */
       }
     }, 4000);
-    // Carry on indexing the library if it was still going when the app was last closed.
+    // Bring the index up to date shortly after opening (new folders, new files, anything
+    // still without a checksum), then every 6 hours while CardMap is open.
     setTimeout(() => {
       if (getSettings(db).libIndexAuto === '1') startIndexing();
+      else scheduleIndex();
     }, 9000);
+    setInterval(scheduleIndex, 6 * 60 * 60 * 1000);
   }
 });
 

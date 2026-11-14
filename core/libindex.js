@@ -472,6 +472,71 @@ async function hashPending(db, opts, job, emit) {
   return res;
 }
 
+/**
+ * Read the checksum of every file on a connected card that has none yet, smallest first,
+ * and record any copy the index already holds. Read-only on the card. Stops quietly if
+ * the card is pulled out.
+ * opts: { cardId, letter, shouldPause() }
+ */
+async function hashCard(db, opts, job, emit) {
+  ensure(db);
+  const files = db.prepare('SELECT * FROM files WHERE card_id = ? AND sha256 IS NULL ORDER BY size, rel_path').all(opts.cardId);
+  const res = { hashed: 0, bytes: 0, failed: 0, missing: 0, total: files.length, matched: 0, renamed: 0, alreadyKnown: 0 };
+  const bytesTotal = files.reduce((n, f) => n + f.size, 0);
+  const setSha = db.prepare('UPDATE files SET sha256 = ? WHERE id = ?');
+  const bySha = db.prepare('SELECT * FROM lib_files WHERE sha256 = ?');
+  const matched = new Set();
+  const root = `${opts.letter}\\`;
+  const progress = throttle(emit || (() => {}), 400);
+  let bytesDone = 0;
+  let filesDone = 0;
+
+  for (const f of files) {
+    while (opts.shouldPause && opts.shouldPause() && !job.cancelled) {
+      progress({ label: 'Paused while another task runs', filesDone, filesTotal: files.length, bytesDone, bytesTotal, paused: true });
+      progress.flush();
+      await sleep(800);
+    }
+    if (job.cancelled) {
+      res.cancelled = true;
+      break;
+    }
+    filesDone += 1;
+    const src = path.join(root, f.rel_path);
+    if (!fs.existsSync(src)) {
+      if (!fs.existsSync(root)) {
+        res.removed = true; // the card was taken out
+        break;
+      }
+      res.missing += 1;
+      continue;
+    }
+    try {
+      const sha = await hashFile(src, job, (n) => {
+        bytesDone += n;
+        progress({ label: `Reading ${f.name}`, filesDone, filesTotal: files.length, bytesDone, bytesTotal });
+      });
+      setSha.run(sha, f.id);
+      res.hashed += 1;
+      res.bytes += f.size;
+      for (const row of bySha.all(sha)) link(db, f, row, res, matched);
+    } catch (e) {
+      if (e.cancelled) {
+        res.cancelled = true;
+        break;
+      }
+      if (!fs.existsSync(root)) {
+        res.removed = true;
+        break;
+      }
+      res.failed += 1;
+    }
+  }
+  progress.flush();
+  res.filesWithCopies = matched.size;
+  return res;
+}
+
 /** Totals for the index, and for each library folder. folders: [{ path, exists }] */
 function indexStatus(db, folders) {
   ensure(db);
@@ -524,4 +589,4 @@ async function runFolderScan(db, opts, job, emit) {
   return { scanned: inv.files, indexed, ...m, skippedFolders: inv.skippedFolders };
 }
 
-module.exports = { inventory, discover, foundFolders, foundPrefixes, dropScanned, dropWholeDrive, matchCards, hashPending, indexStatus, runFolderScan };
+module.exports = { inventory, discover, foundFolders, foundPrefixes, dropScanned, dropWholeDrive, matchCards, hashPending, hashCard, indexStatus, runFolderScan };
