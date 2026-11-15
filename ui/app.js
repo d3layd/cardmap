@@ -168,6 +168,8 @@ function renderSidebar() {
       h('span', { class: 'grow' }, 'Library index', h('div', { class: 'sub', id: 'navbg' }, state.bg ? `Indexing${state.bg.bytesTotal ? ` ${Math.floor((state.bg.bytesDone / state.bg.bytesTotal) * 100)}%` : ''}` : state.newDrives.length ? `New drive connected` : ''))),
     h('button', { class: `nav-item${state.view === 'allfiles' ? ' active' : ''}`, onclick: () => show('allfiles') }, h('span', { class: 'grow' }, 'All files')),
     h('button', { class: `nav-item${state.view === 'dupes' ? ' active' : ''}`, onclick: () => show('dupes') }, h('span', { class: 'grow' }, 'Duplicates')),
+    h('button', { class: `nav-item${state.view === 'projects' ? ' active' : ''}`, onclick: () => show('projects') }, h('span', { class: 'grow' }, 'Projects')),
+    h('button', { class: `nav-item${state.view === 'rules' ? ' active' : ''}`, onclick: () => show('rules') }, h('span', { class: 'grow' }, 'Rules')),
     h('button', { class: `nav-item${state.view === 'reconcile' ? ' active' : ''}`, onclick: () => show('reconcile') }, h('span', { class: 'grow' }, 'Drives')),
     h('button', { class: `nav-item${state.view === 'compare' ? ' active' : ''}`, onclick: () => show('compare') }, h('span', { class: 'grow' }, 'Compare')),
     h('button', { class: `nav-item${state.view === 'nearmatch' ? ' active' : ''}`, onclick: () => show('nearmatch') }, h('span', { class: 'grow' }, 'Near matches')),
@@ -192,6 +194,8 @@ function show(view) {
   if (view === 'dupes') loadDupes(true);
   if (view === 'allfiles') loadAllFiles();
   if (view === 'reconcile') loadReconcile();
+  if (view === 'rules') loadRules();
+  if (view === 'projects') loadProjects();
   if (view === 'compare') loadCompare();
   if (view === 'nearmatch') loadNearMatch();
   if (view === 'lightroom') loadEdits();
@@ -203,7 +207,7 @@ window.__show = (v) => {
   if (v.startsWith('allfiles:')) { state.allFiles = { show: v.slice(9), q: '' }; return show('allfiles'); }
   if (v.startsWith('dupes:')) { state.dupeTab = v.slice(6); return show('dupes'); }
   if (v.startsWith('lookup:')) { state.lookup = { q: v.slice(7), res: null }; show('lookup'); return runLookup(); }
-  if (v === 'rules') { state.rulesOpen = true; return show('index'); }
+  if (v === 'scanrules') { state.rulesOpen = true; return show('index'); }
   if (v.startsWith('local:')) { state.drawer = 'local'; return openMounted(v.slice(6)); }
   if (v.startsWith('lr:')) { state.drawer = 'lightroom'; return openMounted(v.slice(3)); }
   if (v.startsWith('m:')) return openMounted(v.slice(2));
@@ -221,7 +225,7 @@ function resultNotice() {
   let text = 'Done.';
   if (r.kind === 'import') {
     text = `${x.cancelled ? 'Import cancelled' : 'Import finished'}: ${x.copied} copied and verified, ${x.skipped} already in place, ${x.failed} failed.`;
-    if (x.groups) text += ` By group: ${x.groups.map((g) => `${[g.profile, g.shoot].filter(Boolean).join(': ')} ${g.copied} copied`).join('; ')}.`;
+    if (x.groups) text += ` By group: ${x.groups.map((g) => `${[g.profile, g.shoot].filter(Boolean).join(': ')} ${g.lightroomOnly ? `${g.lightroomOnly} for Lightroom only` : `${g.copied} copied`}`).join('; ')}.`;
     const lo = x.leftOut || {};
     if (lo.skip || lo.unready) text += ` Left out: ${[lo.skip ? `${lo.skip} marked skip` : '', lo.unready ? `${lo.unready} not marked ready` : ''].filter(Boolean).join(', ')}.`;
   } else if (r.kind === 'lightroom') {
@@ -484,14 +488,17 @@ function lightroomPanel(s, rows, keys, unit) {
   const src = state.lrSources && state.lrSources.cardId === s.card.id ? state.lrSources : null;
   if (!src) api.invoke('lightroom:sources', s.card.id).then((x) => { state.lrSources = { cardId: s.card.id, ...x }; renderMain(); });
   const options = [
+    ...(src ? src.groups : []).map((g, i) => [`group:${i}`, `Group ${[g.profile, g.shoot].filter(Boolean).join(': ')} (${g.files})`]),
     src && src.lastImport ? ['lastImport', `Files from the last import (${src.lastImport})`] : null,
     src && src.ready ? ['ready', `Files marked Ready (${src.ready})`] : null,
     keys.length ? ['rows', `The ${keys.length} ticked ${unit}${keys.length === 1 ? '' : 's'} (${count} files)`] : null,
     ['card', `The whole card (${s.totals.count} files)`],
   ].filter(Boolean);
   const source = options.some(([k]) => k === state.form.lrSource) ? state.form.lrSource : options[0][0];
+  const grp = source.startsWith('group:') ? src.groups[Number(source.slice(6))] : null;
   const query = { cardId: s.card.id,
-    ...(source === 'lastImport' || source === 'ready' ? { source }
+    ...(grp ? { source: 'group', profile: grp.profile, shoot: grp.shoot }
+      : source === 'lastImport' || source === 'ready' ? { source }
       : source === 'rows' ? (unit === 'date' ? { dates: keys } : { folders: keys }) : {}) };
   const tile = h('div', { class: 'dragtile', draggable: 'true', tabindex: '0',
     ondragstart: (e) => { e.preventDefault(); api.drag(query); } },
@@ -511,7 +518,8 @@ function lightroomPanel(s, rows, keys, unit) {
       options.map(([k, label]) => h('label', { class: 'check' },
         h('input', { type: 'radio', name: 'lrsource', checked: k === source, onchange: () => { state.form.lrSource = k; renderMain(); } }), ` ${label}`)),
       source === 'rows' || source === 'card' ? h('div', { class: 'none' }, `${source === 'card' ? s.totals.lightroom : have} of these are already recorded as in Lightroom.`) : null,
-      h('div', { class: 'none' }, 'Files already in Lightroom and files marked skip are left out.')),
+      h('div', { class: 'none' }, 'Files already in Lightroom and files marked skip are left out.'),
+      grp ? h('div', {}, 'Put them in the album ', h('strong', {}, grp.album), ' in Lightroom.') : null),
 
     h('h3', {}, h('span', { class: 'step' }, '2'), 'Hand them to Lightroom'),
     h('button', { class: 'btn wide', onclick: async () => {
@@ -697,7 +705,7 @@ function reviewPrompt(s, title) {
 // reviewing, then "Import all groups" copies each group with its own profile.
 const groupText = (r) => (r.group ? [r.group, r.groupShoot].filter(Boolean).join(': ') : '');
 async function loadProfiles() {
-  state.profiles = await api.invoke('profiles:get');
+  [state.profiles, state.projectList] = await Promise.all([api.invoke('profiles:get'), api.invoke('projects:get')]);
   return state.profiles;
 }
 function groupBar(cardId, chosen, apply) {
@@ -713,8 +721,9 @@ function groupBar(cardId, chosen, apply) {
     h('span', { class: 'none' }, chosen.length ? `Send ${chosen.length} selected to` : 'Tick files, then send them to'),
     h('select', { 'aria-label': 'Import profile', onchange: (e) => { f.profile = e.target.value; f.shoot = ''; renderMain(); } },
       state.profiles.map((p) => h('option', { value: p.name, selected: p.name === f.profile }, p.name))),
-    h('input', { type: 'text', class: 'inline', value: f.shoot, placeholder: prof && prof.shoot ? prof.shoot : 'Shoot name (optional)', 'aria-label': 'Shoot name',
+    h('input', { type: 'text', class: 'inline', list: 'project-names', value: f.shoot, placeholder: prof && prof.shoot ? prof.shoot : 'Project (pick or type a new one)', 'aria-label': 'Project',
       oninput: (e) => { f.shoot = e.target.value; } }),
+    h('datalist', { id: 'project-names' }, (state.projectList || []).filter((p) => p.org === f.profile).map((p) => h('option', { value: p.name }, p.date || ''))),
     h('button', { class: 'btn primary', disabled: !chosen.length, onclick: () => apply(chosen, f.profile, f.shoot.trim() || (prof && prof.shoot) || '') }, 'Add to group'),
     h('button', { class: 'btn', disabled: !chosen.some((r) => r.group), onclick: () => apply(chosen.filter((r) => r.group), null, '') }, 'Remove from group'),
     h('span', { class: 'spacer' }),
@@ -733,7 +742,8 @@ function groupsSection(s) {
     G.map((g) => {
       const p = prof.get(g.profile);
       return h('div', { class: 'none' }, h('strong', {}, [g.profile, g.shoot].filter(Boolean).join(': ')), ` · ${g.files} files, ${bytes(g.bytes)} → `,
-        p && p.dest ? [p.dest, p.backup ? ` + ${p.backup}` : '', p.extra.length ? ` + ${p.extra.length} more` : ''] : h('span', { class: 'part' }, 'no "Copy to" folder in this profile'));
+        p && p.dest ? [p.dest, p.backup ? ` + ${p.backup}` : '', p.extra.length ? ` + ${p.extra.length} more` : '']
+          : p && p.lightroom ? 'Lightroom only (nothing copied to a drive)' : h('span', { class: 'part' }, 'no "Copy to" folder in this profile'));
     }),
     h('button', { class: 'btn primary wide', disabled: busy() || !s.mounted, onclick: () => run('import:groups', { cardId: s.card.id }) },
       `Import all ${G.length} group${G.length === 1 ? '' : 's'}`),
@@ -758,10 +768,11 @@ function profilesEditor() {
         h('textarea', { rows: 2, 'aria-label': 'Extra folders', oninput: (e) => { p.extra = e.target.value.split(/\r?\n/).map((x) => x.trim()).filter(Boolean); } }, p.extra.join('\n'))),
       field(p, 'folderPattern', 'Folder name', '{date} {shoot}  (also {year} {month} {day}; use \\ for subfolders)'),
       field(p, 'shoot', 'Default shoot name (optional)', 'Filled in when you add files to this profile'),
+      field(p, 'albumParent', 'Lightroom album folder (optional)', 'The album folder this work goes in, e.g. Client work'),
       h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: Boolean(p.lightroom), onchange: (e) => { p.lightroom = e.target.checked; } }), ' Open Add to Lightroom after importing'),
       h('div', { class: 'row actions' }, h('button', { class: 'btn', onclick: () => { list.splice(i, 1); renderMain(); } }, 'Remove this profile')))),
     h('div', { class: 'row actions' },
-      h('button', { class: 'btn', onclick: () => { list.push({ name: '', dest: '', backup: '', extra: [], folderPattern: '', shoot: '', lightroom: false }); renderMain(); } }, 'Add a profile'),
+      h('button', { class: 'btn', onclick: () => { list.push({ name: '', dest: '', backup: '', extra: [], folderPattern: '', shoot: '', lightroom: false, albumParent: '' }); renderMain(); } }, 'Add a profile'),
       h('button', { class: 'btn primary', onclick: async () => {
         state.profiles = await api.invoke('profiles:save', list);
         state.profileDraft = null;
@@ -1376,7 +1387,7 @@ function renderMain() {
     return [h('div', { class: 'split' }, h('div', { class: 'split-main' }, page),
       copyPlanPanel(vol, () => { state.copyPlanOpen = false; renderMain(); }))];
   };
-  const views = { reconcile: reconcilePage, compare: compareView, nearmatch: nearMatchView, allfiles: allFilesView, dupes: dupesView, lookup: lookupView, card: cardView, files: filesView, map: mapView, index: indexView, lightroom: lightroomView, settings: settingsView, welcome: welcomeView };
+  const views = { rules: rulesView, projects: projectsView, reconcile: reconcilePage, compare: compareView, nearmatch: nearMatchView, allfiles: allFilesView, dupes: dupesView, lookup: lookupView, card: cardView, files: filesView, map: mapView, index: indexView, lightroom: lightroomView, settings: settingsView, welcome: welcomeView };
   document.getElementById('main').replaceChildren(...views[state.view]().flat(Infinity).filter(Boolean));
 }
 
@@ -1494,6 +1505,7 @@ api.on('job', async (p) => {
     if (p.kind === 'import' && !p.error) {
       state.lrSources = null; // counts changed
       state.groups = null;
+      if (state.projectsPage) state.projectsPage.data = null;
       state.form.lrSource = 'lastImport';
       if ((state.form.thenLightroom || (p.result && p.result.lightroom)) && state.view === 'card') state.drawer = 'lightroom';
     }

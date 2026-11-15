@@ -12,6 +12,8 @@ const { fileMap } = require('./core/filemap');
 const { driveGaps } = require('./core/reconcile');
 const { compareSides, listSides } = require('./core/compare');
 const { nearMatches } = require('./core/nearmatch');
+const { runRules } = require('./core/rules');
+const { projectLog } = require('./core/projectlog');
 const { buildPlan, runPlan } = require('./core/copyplan');
 const { recordScan, recordChanges, history, drivesOverTime } = require('./core/history');
 const { createWatcher } = require('./core/watch');
@@ -309,11 +311,18 @@ function registerIpc() {
       backup: p.backup || '', backupPin: p.backup ? pin(p.backup) : null,
       extraPins: (p.extra || []).filter(Boolean).map((x) => pin(x)),
       folderPattern: p.folderPattern || '', shoot: p.shoot || '', lightroom: Boolean(p.lightroom),
+      albumParent: String(p.albumParent || '').trim(),
     }));
     setSettings(db, { importProfiles: JSON.stringify(clean) });
     return readProfiles();
   });
-  ipcMain.handle('groups:set', (_e, { cardId, fileIds, profile, shoot }) => setGroup(db, cardId, fileIds || [], profile, shoot));
+  ipcMain.handle('groups:set', (_e, { cardId, fileIds, profile, shoot }) => {
+    // A project name typed here for the first time is kept, so it is offered next time.
+    if (profile && shoot && !readProjects().some((p) => p.org === profile && p.name.toLowerCase() === String(shoot).toLowerCase())) {
+      saveProjects([...readProjects(), { org: profile, name: shoot, date: '' }]);
+    }
+    return setGroup(db, cardId, fileIds || [], profile, shoot);
+  });
   ipcMain.handle('groups:get', (_e, cardId) => cardGroups(db, cardId).map((g) => ({ ...g, fileIds: undefined })));
 
   // Import every group on a card, each with its own profile, one after another.
@@ -323,17 +332,27 @@ function registerIpc() {
     const profiles = new Map(readProfiles().map((p) => [p.name, p]));
     const groups = cardGroups(db, cardId);
     if (!groups.length) throw new Error('No files on this card are in a group yet.');
-    const missing = [...new Set(groups.filter((g) => !profiles.get(g.profile) || !profiles.get(g.profile).dest).map((g) => g.profile))];
-    if (missing.length) throw new Error(`These profiles have no "Copy to" folder: ${missing.join(', ')}. Set one in Settings.`);
+    // A profile with no "Copy to" folder is Lightroom only: nothing is copied for it,
+    // its files are handed to Lightroom afterwards. A profile that is gone is an error.
+    const missing = [...new Set(groups.filter((g) => !profiles.get(g.profile)).map((g) => g.profile))];
+    if (missing.length) throw new Error(`These profiles no longer exist: ${missing.join(', ')}. Put the files in another group.`);
+    const lrOnly = (p) => !p.dest && p.lightroom;
+    const noPlace = [...new Set(groups.filter((g) => { const p = profiles.get(g.profile); return !p.dest && !p.lightroom; }).map((g) => g.profile))];
+    if (noPlace.length) throw new Error(`These profiles have no "Copy to" folder and do not add to Lightroom: ${noPlace.join(', ')}. Set one in Settings.`);
     return startJob('import', async (j, emit) => {
       const total = { copied: 0, skipped: 0, failed: 0, bytes: 0, errors: [], groups: [], importIds: [], lightroom: false };
       for (const [i, g] of groups.entries()) {
         if (j.cancelled) { total.cancelled = true; break; }
         const p = profiles.get(g.profile);
+        if (lrOnly(p)) {
+          total.lightroom = true;
+          total.groups.push({ profile: g.profile, shoot: g.shoot, copied: 0, skipped: 0, failed: 0, lightroomOnly: g.files });
+          continue;
+        }
         const tag = `${g.profile}${g.shoot ? `: ${g.shoot}` : ''} (group ${i + 1} of ${groups.length})`;
         const r = await runImport(db, {
           cardId, letter: drive.letter, fileIds: g.fileIds, shoot: g.shoot || p.shoot || '',
-          dest: p.dest, backup: p.backup, extra: p.extra, folderPattern: p.folderPattern, perFolder: true,
+          dest: p.dest, backup: p.backup, extra: p.extra, folderPattern: p.folderPattern, perFolder: true, profile: g.profile,
         }, j, (x) => emit({ ...x, label: `${tag}: ${x.label || ''}` }));
         for (const k of ['copied', 'skipped', 'failed', 'bytes']) total[k] += r[k] || 0;
         total.errors.push(...(r.errors || []));
@@ -731,6 +750,55 @@ function registerIpc() {
   ipcMain.handle('compare:sides', () => listSides(db));
   ipcMain.handle('compare:run', (_e, arg) => compareSides(db, arg || {}));
   ipcMain.handle('nearmatch:get', () => nearMatches(db, { limit: 1000 }));
+
+  // ----- Your filing rules: settings in rules.json next to the database (never in the
+  // repo); rules.example.json in the app folder is the blank template. -----
+  const rulesFile = () => path.join(path.dirname(dbFile), 'rules.json');
+  const expandEnv = (v) => (typeof v === 'string' ? v.replace(/%([^%]+)%/g, (m, k) => process.env[k] || m)
+    : Array.isArray(v) ? v.map(expandEnv)
+      : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, expandEnv(x)])) : v);
+  const readRules = () => {
+    if (!fs.existsSync(rulesFile())) return null;
+    return expandEnv(JSON.parse(fs.readFileSync(rulesFile(), 'utf8')));
+  };
+  ipcMain.handle('rules:run', () => {
+    try {
+      const config = readRules();
+      if (!config) return { error: 'No rules file yet. Press "Edit rules file" to make one from the template, fill it in, then check again.' };
+      const vols = volumesNow;
+      return runRules(db, config, {
+        letterOf: (vol) => (vols.find((v) => v.serial === vol) || {}).letter || null,
+        volOfPath: (p) => (vols.find((v) => String(p).toUpperCase().startsWith(v.letter.toUpperCase())) || {}).serial || null,
+        diskOfVol,
+        now: new Date(),
+      });
+    } catch (e) {
+      return { error: `The rules file could not be read: ${e.message}` };
+    }
+  });
+  ipcMain.handle('rules:open', () => {
+    if (!fs.existsSync(rulesFile())) fs.copyFileSync(path.join(__dirname, 'rules.example.json'), rulesFile());
+    return shell.openPath(rulesFile());
+  });
+
+  // ----- Projects: planned ahead under a profile (an org), and where their files went -----
+  const readProjects = () => {
+    try {
+      return JSON.parse(getSettings(db).projects || '[]');
+    } catch {
+      return [];
+    }
+  };
+  const saveProjects = (list) => {
+    const seen = new Set();
+    const clean = (list || []).map((p) => ({ org: String(p.org || '').trim(), name: String(p.name || '').trim(), date: String(p.date || '').trim(), note: String(p.note || '').trim() }))
+      .filter((p) => p.org && p.name && !seen.has(`${p.org}|${p.name}`.toLowerCase()) && seen.add(`${p.org}|${p.name}`.toLowerCase()));
+    setSettings(db, { projects: JSON.stringify(clean) });
+    return clean;
+  };
+  ipcMain.handle('projects:get', () => readProjects());
+  ipcMain.handle('projects:save', (_e, list) => saveProjects(list));
+  ipcMain.handle('projects:log', () => projectLog(db, readProjects()));
   // Second copies of the files that are only on one drive. Only ever writes new files
   // under the chosen folder; the source drive is read, never changed.
   const planOpts = (o) => ({ vol: o.vol, folder: o.folder, dest: o.dest, countLightroom: safeRules().countLightroom, diskOf: diskOfVol });
@@ -895,6 +963,10 @@ function registerIpc() {
   const lastImportIds = new Map(); // cardId -> import ids of the latest group import
   const lastImportId = (cardId) => (db.prepare('SELECT max(id) AS id FROM imports WHERE card_id = ?').get(cardId) || {}).id;
   const lrPick = (q) => {
+    if (q.source === 'group') {
+      const g = cardGroups(db, q.cardId).find((x) => x.profile === q.profile && x.shoot === (q.shoot || ''));
+      return { ...q, fileIds: g ? g.fileIds : [] };
+    }
     if (q.source === 'ready') {
       return { ...q, fileIds: db.prepare("SELECT id FROM files WHERE card_id = ? AND mark = 'ready'").all(q.cardId).map((r) => r.id) };
     }
@@ -909,6 +981,12 @@ function registerIpc() {
   ipcMain.handle('lightroom:sources', (_e, cardId) => ({
     ready: db.prepare("SELECT count(*) AS n FROM files WHERE card_id = ? AND mark = 'ready'").get(cardId).n,
     lastImport: lrPick({ cardId, source: 'lastImport' }).fileIds.length,
+    // Each import group, with the Lightroom album its profile says it belongs in.
+    groups: cardGroups(db, cardId).map((g) => {
+      const p = readProfiles().find((x) => x.name === g.profile) || {};
+      const name = [g.firstDate, g.shoot || p.shoot || g.profile].filter(Boolean).join(' ');
+      return { profile: g.profile, shoot: g.shoot, files: g.files, album: p.albumParent ? `${p.albumParent} > ${name}` : name };
+    }),
   }));
   const notInLightroom = (q0) => {
     const q = lrPick(q0);

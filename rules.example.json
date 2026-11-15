@@ -1,0 +1,27 @@
+{
+  "_help": {
+    "drives.work": "Drive root or folder where current projects live; empty = not set.",
+    "drives.archive": "Drive root or folder where finished projects are archived; empty = not set.",
+    "drives.familyBackup": "Drive root or folder of the family backup; used to report how much of the archive is already there.",
+    "drives.secondCopy": "Drive root or folder that holds the second copy of the archive; used to report how much is already there.",
+    "drives.encrypted": "Drive root or folder of the encrypted drive; empty = not set (reserved, no check uses it yet).",
+    "folders.sort": "Folder where new things wait to be sorted; files older than ages.sortDays are reported.",
+    "folders.inbox": "List of landing folders such as Downloads or Desktop; files older than ages.inboxDays are reported.",
+    "photo.albumPattern": "Regular expression every Lightroom album name must match (default: a date then a title).",
+    "photo.albumParents": "Names of the top-level Lightroom album folders allowed to hold albums; empty = not checked.",
+    "photo.keepAll": "Folder paths or album paths (start of the path) left out of the photo checks.",
+    "video.subfolders": "Subfolders every video project has; a folder holding any of them counts as a project.",
+    "video.finalsFolder": "Name of the subfolder that holds finished videos.",
+    "video.finalsPattern": "Regular expression every file name in the finals folder must match (without extension).",
+    "video.secondCopyCategories": "Reserved for project categories that need a second copy; not used by any check yet.",
+    "cards.maxDays": "Days a card may hold photos that do not yet have verified copies on two separate disks.",
+    "ages.inboxDays": "Days a file may sit in an inbox folder.",
+    "ages.sortDays": "Days a file may sit in the sort folder."
+  },
+  "drives": { "work": "", "archive": "", "familyBackup": "", "secondCopy": "", "encrypted": "" },
+  "folders": { "sort": "", "inbox": [] },
+  "photo": { "albumPattern": "^\\d{4}-\\d{2}-\\d{2} .+", "albumParents": [], "keepAll": [] },
+  "video": { "subfolders": ["Footage", "Project", "Finals"], "finalsFolder": "Finals", "finalsPattern": "^[^_]+_[^_]+_\\d{4}-\\d{2}-\\d{2}_v\\d+", "secondCopyCategories": [] },
+  "cards": { "maxDays": 7 },
+  "ages": { "inboxDays": 7, "sortDays": 31 }
+}

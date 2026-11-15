@@ -71,9 +71,10 @@ function setGroup(db, cardId, fileIds, profile, shoot) {
 /** A card's import groups: [{ profile, shoot, files, bytes, fileIds }]. */
 function cardGroups(db, cardId) {
   const groups = new Map();
-  for (const f of db.prepare("SELECT id, size, grp, grp_shoot FROM files WHERE card_id = ? AND grp IS NOT NULL AND coalesce(mark, '') != 'skip'").all(cardId)) {
+  for (const f of db.prepare("SELECT id, size, grp, grp_shoot, capture_date FROM files WHERE card_id = ? AND grp IS NOT NULL AND coalesce(mark, '') != 'skip'").all(cardId)) {
     const key = `${f.grp}\u0000${f.grp_shoot || ''}`;
-    const g = groups.get(key) || { profile: f.grp, shoot: f.grp_shoot || '', files: 0, bytes: 0, fileIds: [] };
+    const g = groups.get(key) || { profile: f.grp, shoot: f.grp_shoot || '', files: 0, bytes: 0, fileIds: [], firstDate: f.capture_date };
+    if (f.capture_date && (!g.firstDate || f.capture_date < g.firstDate)) g.firstDate = f.capture_date;
     g.files += 1;
     g.bytes += f.size;
     g.fileIds.push(f.id);

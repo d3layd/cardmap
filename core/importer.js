@@ -144,8 +144,8 @@ async function runImport(db, opts, job, emit) {
 
   const importId = Number(
     db
-      .prepare('INSERT INTO imports (card_id, shoot, dest, backup, started) VALUES (?, ?, ?, ?, ?)')
-      .run(cardId, shoot || null, dest, backup || null, nowIso()).lastInsertRowid
+      .prepare('INSERT INTO imports (card_id, shoot, dest, backup, started, profile) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(cardId, shoot || null, dest, backup || null, nowIso(), opts.profile || null).lastInsertRowid
   );
 
   const result = { importId, copied: 0, skipped: 0, failed: 0, bytes: 0, errors: [] };

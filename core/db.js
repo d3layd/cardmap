@@ -85,6 +85,10 @@ function openDb(file) {
   if (!db.prepare('PRAGMA table_info(files)').all().some((c) => c.name === 'mark')) {
     db.exec('ALTER TABLE files ADD COLUMN mark TEXT');
   }
+  // The profile (org) an import was made with, for the project log.
+  if (!db.prepare('PRAGMA table_info(imports)').all().some((c) => c.name === 'profile')) {
+    db.exec('ALTER TABLE imports ADD COLUMN profile TEXT');
+  }
   // Import group: the profile a file is to be imported with, and its shoot name.
   if (!db.prepare('PRAGMA table_info(files)').all().some((c) => c.name === 'grp')) {
     db.exec('ALTER TABLE files ADD COLUMN grp TEXT; ALTER TABLE files ADD COLUMN grp_shoot TEXT;');
