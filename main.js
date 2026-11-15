@@ -95,7 +95,7 @@ function copyBackupElsewhere() {
     console.error('CardMap second backup failed:', e.message);
   }
 }
-const { listDrives, physicalDrives } = require('./core/drives');
+const { listDrives, listCardDrives, physicalDrives } = require('./core/drives');
 const { buildReport, recheck } = require('./core/dupes');
 const { librarySig, saveReport, loadReport, snapshot, snapshots } = require('./core/reports');
 const { setVolumes, syncDb, pin, currentPath, online, pathExists } = require('./core/volumes');
@@ -114,6 +114,9 @@ let job = null;
 let jobSeq = 0;
 // cardId -> ids of the files on the card at its last scan
 const present = new Map();
+// Cards listed since they were plugged in: serial -> cardId. A card's files cannot change
+// while it sits in the reader, so it is listed once per insertion, not on every click.
+const listedCards = new Map();
 
 const send = (channel, payload) => {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
@@ -156,6 +159,8 @@ async function refreshDrives() {
     const changed = JSON.stringify(cards.map((d) => d.serial)) !== JSON.stringify(drives.map((d) => d.serial));
     const had = new Set(drives.map((d) => d.serial));
     drives = cards;
+    // A card taken out must be listed again when it comes back: it may have been shot on.
+    for (const serial of listedCards.keys()) if (!cards.some((d) => d.serial === serial)) listedCards.delete(serial);
     if (changed) {
       send('cards', cardList());
       onCardsAdded(cards.filter((d) => !had.has(d.serial)));
@@ -256,6 +261,21 @@ const diskOf = (p) => {
 const refreshPhys = () => physicalDrives().then((r) => { if (Object.keys(r).length) physByLetter = r; });
 
 function registerIpc() {
+  // Note every request from the window that takes over 200 ms in perf.log beside the
+  // database, with what was running at the time, so slow screens can be found later.
+  const handle = ipcMain.handle.bind(ipcMain);
+  ipcMain.handle = (channel, fn) => handle(channel, async (...args) => {
+    const t = Date.now();
+    try {
+      return await fn(...args);
+    } finally {
+      const ms = Date.now() - t;
+      if (ms > 200 && dbFile && !channel.endsWith(':start')) {
+        const busy = [job && `task ${job.kind}`, bg && 'indexing', cardBg.size && 'card checksums'].filter(Boolean).join(', ') || 'nothing else';
+        fs.appendFile(path.join(path.dirname(dbFile), 'perf.log'), `${new Date().toISOString()}  ${channel}  ${ms} ms  (running: ${busy})\n`, () => {});
+      }
+    }
+  });
   ipcMain.handle('cards', async () => {
     await refreshDrives();
     return cardList();
@@ -265,8 +285,11 @@ function registerIpc() {
   ipcMain.handle('card:scan', async (_e, letter) => {
     const drive = drives.find((d) => d.letter === letter);
     if (!drive) throw new Error('That card is no longer connected.');
+    const known = listedCards.get(drive.serial);
+    if (known && present.has(known)) return { ...cardSummary(db, known, present.get(known), safeRules()), letter, mounted: true };
     const { cardId, presentIds } = await scanCard(db, drive);
     present.set(cardId, presentIds);
+    listedCards.set(drive.serial, cardId);
     return { ...cardSummary(db, cardId, presentIds, safeRules()), letter, mounted: true };
   });
 
@@ -274,6 +297,80 @@ function registerIpc() {
     const drive = driveFor(cardId);
     const s = cardSummary(db, cardId, drive ? present.get(cardId) : null, safeRules());
     return s && { ...s, letter: drive?.letter ?? null, mounted: Boolean(drive) };
+  });
+
+  // Format a card, only once it is safe. CardMap does not erase anything itself: after its
+  // checks pass it opens Windows' own Format window for that drive, where you press Start.
+  // Checks, all made fresh: the card is the one on screen (by volume serial, not letter),
+  // it is still a card (removable or has DCIM), it is not a drive in the library index,
+  // no other task is running, and every file has its verified copies right now.
+  ipcMain.handle('card:format', async (_e, { cardId, allowSkipped }) => {
+    if (job) throw new Error('Wait for the running task to finish first.');
+    const card = db.prepare('SELECT serial FROM cards WHERE id = ?').get(cardId);
+    if (!card) throw new Error('Unknown card.');
+    const now = (await listCardDrives()).find((d) => d.serial === card.serial);
+    if (!now) throw new Error('This card is not connected, or Windows does not see it as a card.');
+    const sys = (process.env.SystemDrive || 'C:').toUpperCase();
+    if (!/^[A-Z]:$/i.test(now.letter) || now.letter.toUpperCase() === sys) throw new Error('Refusing: that is not a card drive.');
+    if (db.prepare('SELECT 1 AS x FROM lib_files WHERE vol = ? LIMIT 1').get(card.serial)) {
+      throw new Error('Refusing: this drive is part of the library index, so it is not treated as a card.');
+    }
+    await refreshDrives();
+    const s = cardSummary(db, cardId, present.get(cardId) || null, safeRules());
+    const ok = s.safeToFormat || (allowSkipped && s.safeExceptSkipped);
+    if (!ok) throw new Error('Not safe to format: some files do not have their verified copies. Nothing was done.');
+    // Stop reading checksums from the card, so Windows can lock it for formatting.
+    const reading = cardBg.get(card.serial);
+    if (reading) reading.job.cancelled = true;
+    const index = now.letter.toUpperCase().charCodeAt(0) - 65; // A: = 0
+    // The Format window belongs to CardMap's window, so Windows shows it in front of it.
+    const hwnd = win && !win.isDestroyed() ? win.getNativeWindowHandle().readBigUInt64LE(0).toString() : '0';
+    const ps = "Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class F{[DllImport(\"shell32.dll\")]public static extern uint SHFormatDrive(IntPtr h,uint d,uint id,uint o);}';"
+      + ` [F]::SHFormatDrive([IntPtr]${hwnd}, ${index}, 0xFFFF, 0)`;
+    db.prepare('INSERT INTO card_log (at, card_id, file_id, name, action, detail) VALUES (?, ?, NULL, NULL, ?, ?)').run(
+      new Date().toISOString(), cardId, 'format', `Asked Windows to open its Format window for ${now.letter} (${s.totals.count} files, all with verified copies${s.safeToFormat ? '' : ', apart from those marked skip'})`
+    );
+    // Runs until the Format window is closed; its answer says whether the card was formatted.
+    const code = await new Promise((resolve) => {
+      execFile('powershell.exe', ['-NoProfile', '-STA', '-Command', ps], { windowsHide: true }, (err, out) => resolve(err ? null : Number(String(out).trim())));
+    });
+    const result = code === 0xFFFFFFFE ? 'cancelled' : code === 0xFFFFFFFD ? 'could not be formatted'
+      : code === 0xFFFFFFFF || code === null || Number.isNaN(code) ? 'not opened (Windows refused)' : 'formatted';
+    db.prepare('INSERT INTO card_log (at, card_id, file_id, name, action, detail) VALUES (?, ?, NULL, NULL, ?, ?)').run(new Date().toISOString(), cardId, 'format', `Format window: ${result} (code ${code})`);
+    await refreshDrives();
+    return { letter: now.letter, result };
+  });
+
+  // Eject a card once CardMap has let go of it: no task running, background reading stopped.
+  // Windows does the eject (as Explorer's Eject does) and refuses if another program has
+  // a file open on it.
+  ipcMain.handle('card:eject', async (_e, { cardId }) => {
+    if (job) throw new Error(`Wait for the running task (${job.kind}) to finish first, or cancel it.`);
+    const card = db.prepare('SELECT serial FROM cards WHERE id = ?').get(cardId);
+    const now = card && (await listCardDrives()).find((d) => d.serial === card.serial);
+    if (!now) throw new Error('This card is not connected.');
+    const reading = cardBg.get(card.serial);
+    if (reading) {
+      reading.job.cancelled = true;
+      for (let i = 0; i < 50 && cardBg.has(card.serial); i++) await new Promise((r) => setTimeout(r, 100));
+      if (cardBg.has(card.serial)) throw new Error('CardMap is still reading the card. Try again in a moment.');
+    }
+    // Explorer's Eject runs in the background: keep the helper alive long enough for it to
+    // finish, or the eject is dropped when the helper exits.
+    const ps = `(New-Object -ComObject Shell.Application).Namespace(17).ParseName('${now.letter}').InvokeVerb('Eject'); Start-Sleep -Seconds 4`;
+    await new Promise((resolve) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { windowsHide: true }, () => resolve()));
+    // The eject is done when Windows no longer lists the card.
+    let gone = false;
+    for (let i = 0; i < 20 && !gone; i++) {
+      await new Promise((r) => setTimeout(r, 300));
+      gone = !(await listCardDrives()).some((d) => d.serial === card.serial);
+    }
+    db.prepare('INSERT INTO card_log (at, card_id, file_id, name, action, detail) VALUES (?, ?, NULL, NULL, ?, ?)').run(
+      new Date().toISOString(), cardId, 'eject', gone ? `Ejected from ${now.letter}` : `Eject from ${now.letter} did not finish`
+    );
+    await refreshDrives();
+    if (!gone) throw new Error(`Windows did not eject ${now.letter}. Another program may have a file open on it; close it and try again.`);
+    return { letter: now.letter };
   });
 
   ipcMain.handle('import:start', (_e, opts) => {
@@ -339,6 +436,10 @@ function registerIpc() {
     if (missing.length) throw new Error(`These profiles no longer exist: ${missing.join(', ')}. Put the files in another group.`);
     const lrOnly = (p) => !p.dest && p.lightroom;
     const noPlace = [...new Set(groups.filter((g) => { const p = profiles.get(g.profile); return !p.dest && !p.lightroom; }).map((g) => g.profile))];
+    const needsProject = groups.filter((g) => { const p = profiles.get(g.profile); return p.dest && /\{shoot\}/.test(p.folderPattern || '') && !(g.shoot || p.shoot); });
+    if (needsProject.length) {
+      throw new Error(`These groups have no project name, and their profile puts files in a project folder: ${[...new Set(needsProject.map((g) => g.profile))].join(', ')}. Open the files, pick a project and add them to the group again.`);
+    }
     if (noPlace.length) throw new Error(`These profiles have no "Copy to" folder and do not add to Lightroom: ${noPlace.join(', ')}. Set one in Settings.`);
     return startJob('import', async (j, emit) => {
       const total = { copied: 0, skipped: 0, failed: 0, bytes: 0, errors: [], groups: [], importIds: [], lightroom: false };
@@ -372,9 +473,14 @@ function registerIpc() {
 
   ipcMain.handle('lightroom:start', (_e, opts) => {
     const drive = driveFor(opts.cardId);
-    return startJob('lightroom', (j, emit) =>
-      runLightroomCheck(db, { ...lrPick(opts), letter: drive?.letter ?? null, roots: lightroomRoots(), catalogs: findCatalogs('') }, j, emit)
-    );
+    const scope = opts.source === 'lastImport' ? 'from the last import'
+      : opts.source === 'ready' ? 'marked Ready'
+        : opts.source === 'group' ? `in the group ${[opts.profile, opts.shoot].filter(Boolean).join(': ')}`
+          : (opts.dates && opts.dates.length) || (opts.folders && opts.folders.length) ? 'in the ticked rows' : 'on this card';
+    return startJob('lightroom', async (j, emit) => ({
+      ...(await runLightroomCheck(db, { ...lrPick(opts), letter: drive?.letter ?? null, roots: lightroomRoots(), catalogs: findCatalogs('') }, j, emit)),
+      scope,
+    }));
   });
 
   // Match card files against the library index. arg: a folder path to list first, or
@@ -704,6 +810,7 @@ function registerIpc() {
     try {
       const { cardId, presentIds } = await scanCard(db, drive);
       present.set(cardId, presentIds);
+      listedCards.set(drive.serial, cardId);
       entry.cardId = cardId;
       out = { result: await hashCard(db, { cardId, letter: drive.letter, shouldPause: () => Boolean(job) }, j, emit) };
       // The library index is matched as each checksum is read; Lightroom from its cached catalog now.

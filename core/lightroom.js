@@ -7,6 +7,26 @@ const { refreshIndex } = require('./lrcatalog');
 /** Prefix for a location that is a Lightroom catalog entry rather than a file on disk. */
 const LR_PREFIX = 'lightroom:';
 
+/**
+ * True when this card file is known to be in Lightroom: a confirmed cloud record, or a
+ * copy in Lightroom's local cache that still exists. Lightroom clears its cache once a
+ * photo is uploaded, so a cache path that is gone means "check again", not "in Lightroom".
+ */
+function knownInLightroom(db, fileId) {
+  return db
+    .prepare("SELECT path FROM locations WHERE file_id = ? AND kind = 'lightroom' AND verified = 1")
+    .all(fileId)
+    .some((l) => l.path.startsWith(LR_PREFIX) || fs.existsSync(l.path));
+}
+
+/** Record the confirmed cloud copy, and drop cache paths for this file that are gone. */
+function recordUploaded(db, fileId, assetId) {
+  addLocation(db, fileId, 'lightroom', `${LR_PREFIX}${assetId}`, true, null);
+  for (const l of db.prepare("SELECT id, path FROM locations WHERE file_id = ? AND kind = 'lightroom'").all(fileId)) {
+    if (!l.path.startsWith(LR_PREFIX) && !fs.existsSync(l.path)) db.prepare('DELETE FROM locations WHERE id = ?').run(l.id);
+  }
+}
+
 /** Lightroom (cloud) keeps recently added originals in <data>\<account id>\originals\YYYY\YYYY-MM-DD\. */
 function findOriginalsRoots(override) {
   if (override) return fs.existsSync(override) ? [override] : [];
@@ -82,13 +102,14 @@ async function runLightroomCheck(db, opts, job, emit) {
 
   let files = db
     .prepare(
-      `SELECT f.*, EXISTS (SELECT 1 FROM locations l WHERE l.file_id = f.id AND l.kind = 'lightroom' AND l.verified = 1) AS known
+      `SELECT f.*
        FROM files f WHERE f.card_id = ? ORDER BY f.capture_date, f.rel_path`
     )
     .all(opts.cardId);
   const pick = pickFiles(opts);
   if (pick) files = files.filter(pick);
   // Files already matched on an earlier check are not read again, but still count as found.
+  for (const f of files) f.known = knownInLightroom(db, f.id);
   result.alreadyFound = files.filter((f) => f.known).length;
   files = files.filter((f) => !f.known);
   if (opts.maxFiles) files = files.slice(0, opts.maxFiles);
@@ -140,7 +161,7 @@ async function runLightroomCheck(db, opts, job, emit) {
         continue;
       }
       if (asset.uploaded) {
-        addLocation(db, f.id, 'lightroom', `${LR_PREFIX}${asset.asset_id}`, true, null);
+        recordUploaded(db, f.id, asset.asset_id);
         result.found += 1;
         continue;
       }
@@ -202,14 +223,16 @@ function matchLightroomCache(db, cardId) {
   const files = db
     .prepare(
       `SELECT f.id, f.sha256, f.size FROM files f WHERE f.card_id = ? AND f.sha256 IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM locations l WHERE l.file_id = f.id AND l.kind = 'lightroom' AND l.verified = 1)`
+`
     )
-    .all(cardId);
+    .all(cardId)
+    .filter((f) => !knownInLightroom(db, f.id));
   for (const f of files) {
     const assets = byKey.all(f.sha256, f.size);
     if (!assets.length) continue;
     const up = assets.find((a) => a.uploaded);
-    addLocation(db, f.id, 'lightroom', `${LR_PREFIX}${(up || assets[0]).asset_id}`, Boolean(up), null);
+    if (up) recordUploaded(db, f.id, up.asset_id);
+    else addLocation(db, f.id, 'lightroom', `${LR_PREFIX}${assets[0].asset_id}`, false, null);
     if (up) out.found += 1;
     else out.notUploaded += 1;
   }

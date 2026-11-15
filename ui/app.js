@@ -230,7 +230,7 @@ function resultNotice() {
     if (lo.skip || lo.unready) text += ` Left out: ${[lo.skip ? `${lo.skip} marked skip` : '', lo.unready ? `${lo.unready} not marked ready` : ''].filter(Boolean).join(', ')}.`;
   } else if (r.kind === 'lightroom') {
     const known = x.alreadyFound || 0;
-    text = `Lightroom check${x.cancelled ? ' cancelled' : ''}: ${x.found + known} of ${x.checked + known} files are in the Lightroom library, ${x.notFound} are not.`;
+    text = `Lightroom check${x.cancelled ? ' cancelled' : ''}: ${x.found + known} of the ${x.checked + known} files ${x.scope || 'checked'} are in the Lightroom library, ${x.notFound} are not.`;
     if (known) text += ` ${known} of them were already matched on an earlier check${x.found ? `, ${x.found} are new` : ''}.`;
     if (x.notUploaded) text += ` ${x.notUploaded} are in the catalog but their upload is not confirmed.`;
     if (x.unverifiable) text += ` ${x.unverifiable} might be there but need the card inserted to confirm.`;
@@ -418,7 +418,7 @@ function importPanel(s, rows, keys, unit) {
 }
 
 const markText = (g) => [g.ready ? `${g.ready} ready` : '', g.skip ? `${g.skip} skip` : ''].filter(Boolean).join(', ');
-const MARK_LOG = { ready: 'Marked ready', skip: 'Marked skip', clear: 'Mark cleared', import: 'Import' };
+const MARK_LOG = { ready: 'Marked ready', skip: 'Marked skip', clear: 'Mark cleared', import: 'Import', group: 'Group', format: 'Format', eject: 'Eject' };
 
 /** The card's log: every mark change and import, newest first. */
 function logPanel(s) {
@@ -611,7 +611,7 @@ function cardView() {
       : s.safeExceptSkipped
         ? h('span', { class: 'badge warn', title: `Every file you did not mark skip has ${s.rules.copies} or more verified copies. Formatting loses the skipped ones.` },
             `Safe to format, apart from ${t.skip - t.skipSafe} file${t.skip - t.skipSafe === 1 ? '' : 's'} marked skip`)
-        : h('span', { class: 'badge warn', title: rulesTitle(s.rules) }, `Not safe to format: ${t.count - t.safe} files have verified copies on fewer than ${s.rules.copies} separate disk${s.rules.copies === 1 ? '' : 's'}`);
+        : h('span', { class: 'badge warn', title: rulesTitle(s.rules) }, (s.rules.copies === 1 ? `Not safe to format: ${t.count - t.safe} files have no verified copy` : `Not safe to format: ${t.count - t.safe} files have verified copies on fewer than ${s.rules.copies} separate disks`) + (t.skip ? ` (${t.skip} of the card's files are marked skip)` : ''));
 
   const setGroup = (g) => { state.groupBy = g; defaultSelection(); renderMain(); };
 
@@ -644,6 +644,8 @@ function cardView() {
       s.totals.lightroom < s.totals.count ? h('button', { class: 'btn', title: 'Every file on this card that Lightroom has no record of', onclick: () =>
         openFiles({ cardId: s.card.id, lr: 'missing' }, `${title}: not in Lightroom`, 'Files Lightroom has no record of, as of the last Lightroom check.') },
         `Not in Lightroom (${(s.totals.count - s.totals.lightroom).toLocaleString()})`) : null,
+      s.mounted ? h('button', { class: 'btn', disabled: busy(), title: busy() ? 'Wait for the running task to finish' : 'Eject the card so it can be taken out', onclick: () => ejectCard(s, title) }, 'Eject') : null,
+      s.mounted && (s.safeToFormat || s.safeExceptSkipped) ? h('button', { class: 'btn', disabled: busy(), onclick: () => formatCard(s, title) }, 'Format card...') : null,
       h('button', { class: 'btn', 'aria-expanded': String(state.drawer === 'log'),
         onclick: () => { state.drawer = state.drawer === 'log' ? null : 'log'; renderMain(); } }, 'Log'),
       s.mounted ? h('button', { class: `btn primary`, 'aria-expanded': String(state.drawer === 'import'),
@@ -675,6 +677,52 @@ function cardView() {
 }
 
 const rulesTitle = (r) => `A file is safe with verified copies on ${r.copies} separate physical disk${r.copies === 1 ? '' : 's'}${r.countLightroom ? ', Lightroom counting as one' : ', not counting Lightroom'}. Two copies on one disk count once. Change this in Settings.`;
+
+// Eject a card: CardMap stops reading it first. Asks first if files are only on the card.
+async function ejectCard(s, title) {
+  const t = s.totals;
+  if (t.unsaved && !window.confirm(`${t.unsaved.toLocaleString()} file${t.unsaved === 1 ? ' is' : 's are'} only on ${title}, with no copy anywhere yet. Eject it anyway?`)) return;
+  try {
+    state.lastResult = { info: `Ejecting ${title}.` };
+    renderMain();
+    const r = await api.invoke('card:eject', { cardId: s.card.id });
+    state.lastResult = { info: `${title} (${r.letter}) was ejected. It is safe to take out.` };
+  } catch (e) {
+    state.lastResult = { error: e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '') };
+  }
+  await loadCards();
+  await refreshSummary();
+  renderMain();
+}
+
+// Format a safe card: CardMap checks again, then opens Windows' Format window for it.
+async function formatCard(s, title) {
+  const t = s.totals;
+  const skipped = s.safeToFormat ? 0 : t.skip - t.skipSafe;
+  const msg = [
+    `Format ${title}?`,
+    '',
+    `All ${t.count.toLocaleString()} files on it have their verified copies${skipped ? `, apart from ${skipped} you marked skip, which will be lost` : ''}.`,
+    'CardMap checks this again, then opens Windows\' Format window for this card. Nothing is erased until you press Start there.',
+    '',
+    'Formatting in the camera is better when you can: it sets up the card the way that camera expects.',
+  ].join('\n');
+  if (!window.confirm(msg)) return;
+  try {
+    state.lastResult = { info: 'Checking the copies again, then opening the Format window. Look for it on screen; it can open behind CardMap.' };
+    renderMain();
+    const r = await api.invoke('card:format', { cardId: s.card.id, allowSkipped: !s.safeToFormat });
+    state.lastResult = r.result === 'formatted'
+      ? { info: `${r.letter} was formatted. Its record stays in CardMap, with every copy it made.` }
+      : r.result.startsWith('not opened')
+        ? { error: `Windows did not open its Format window for ${r.letter}. Nothing was changed. Format the card in the camera, or right-click it in File Explorer and choose Format.` }
+        : { info: `Format window closed: ${r.result}. Nothing on the card was changed by CardMap.` };
+  } catch (e) {
+    state.lastResult = { error: e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '') };
+  }
+  await refreshSummary();
+  renderMain();
+}
 
 // Files only on the card (not copied anywhere, not in Lightroom) that have not been marked
 // Ready or Skip yet: ask for them to be reviewed.
@@ -724,7 +772,15 @@ function groupBar(cardId, chosen, apply) {
     h('input', { type: 'text', class: 'inline', list: 'project-names', value: f.shoot, placeholder: prof && prof.shoot ? prof.shoot : 'Project (pick or type a new one)', 'aria-label': 'Project',
       oninput: (e) => { f.shoot = e.target.value; } }),
     h('datalist', { id: 'project-names' }, (state.projectList || []).filter((p) => p.org === ((prof && prof.albumParent) || f.profile)).map((p) => h('option', { value: p.name }, p.date || ''))),
-    h('button', { class: 'btn primary', disabled: !chosen.length, onclick: () => apply(chosen, f.profile, f.shoot.trim() || (prof && prof.shoot) || '') }, 'Add to group'),
+    h('button', { class: 'btn primary', disabled: !chosen.length, onclick: () => {
+      const project = f.shoot.trim() || (prof && prof.shoot) || '';
+      if (!project && prof && prof.dest && /\{shoot\}/.test(prof.folderPattern || '')) {
+        state.lastResult = { error: `Pick or type a project first: "${prof.name}" puts files in a folder named after the project.` };
+        renderMain();
+        return;
+      }
+      apply(chosen, f.profile, project);
+    } }, 'Add to group'),
     h('button', { class: 'btn', disabled: !chosen.some((r) => r.group), onclick: () => apply(chosen.filter((r) => r.group), null, '') }, 'Remove from group'),
     h('span', { class: 'spacer' }),
     h('button', { class: 'link', onclick: () => show('settings') }, 'Edit profiles'));
@@ -783,9 +839,12 @@ function profilesEditor() {
 }
 
 // Whether Lightroom has a card file: Yes, Not confirmed (in the catalog, upload not confirmed) or No.
+// A copy in Lightroom's local cache counts only while it is still there (Lightroom clears it
+// after uploading), the same rule as the card summary and the Lightroom check.
 const lrState = (r) => {
   const l = r.locations.filter((x) => x.kind === 'lightroom');
-  return !l.length ? 'No' : l.some((x) => x.verified) ? 'Yes' : 'Not confirmed';
+  if (l.some((x) => x.verified && x.exists)) return 'Yes';
+  return l.some((x) => !x.verified) ? 'Not confirmed' : 'No';
 };
 
 function filesView() {
