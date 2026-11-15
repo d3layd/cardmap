@@ -1,16 +1,18 @@
-// Where each project's files went. A project is an org (an import profile) plus a project
-// (shoot) name. Imports record both; this rolls their verified copies up to one row per
-// import, kind of copy and folder, and sums each planned project.
+// Where each project's files went. A project is an org (who the work is for) plus a project
+// (shoot) name. Imports record their profile and project; a profile names its org. This
+// rolls their verified copies up to one row per import, kind of copy and folder, and sums
+// each planned project.
 const path = require('node:path');
 
 /**
- * projects: the planned list [{ org, name, date, note }].
+ * projects: the planned list [{ org, name, date, note }]. orgOf(profile): the org an import
+ * profile belongs to.
  * Returns {
  *   log: [{ at, importId, org, project, card, kind, folder, files, bytes }],
  *   projects: [{ org, name, date, note, planned, files, bytes, folders, lastAt, waiting }],
  * }
  */
-function projectLog(db, projects = []) {
+function projectLog(db, projects = [], orgOf = (p) => p || '') {
   const rows = db
     .prepare(
       `SELECT i.id AS importId, i.started AS at, i.profile AS org, i.shoot AS project,
@@ -27,7 +29,7 @@ function projectLog(db, projects = []) {
   for (const r of rows) {
     const folder = path.dirname(r.path);
     const key = `${r.importId}|${r.kind}|${folder.toLowerCase()}`;
-    const e = byKey.get(key) || { at: r.at, importId: r.importId, org: r.org || '', project: r.project || '', card: r.card || '', kind: r.kind, folder, files: 0, bytes: 0 };
+    const e = byKey.get(key) || { at: r.at, importId: r.importId, org: orgOf(r.org), project: r.project || '', card: r.card || '', kind: r.kind, folder, files: 0, bytes: 0 };
     e.files += 1;
     e.bytes += r.size || 0;
     byKey.set(key, e);
@@ -36,8 +38,9 @@ function projectLog(db, projects = []) {
 
   // Files put in a group on a card but not imported yet, per project.
   const waiting = new Map();
-  for (const w of db.prepare("SELECT grp AS org, grp_shoot AS project, count(*) AS n FROM files WHERE grp IS NOT NULL AND coalesce(mark, '') != 'skip' GROUP BY grp, grp_shoot").all()) {
-    waiting.set(`${w.org}|${w.project || ''}`.toLowerCase(), w.n);
+  for (const w of db.prepare("SELECT grp AS profile, grp_shoot AS project, count(*) AS n FROM files WHERE grp IS NOT NULL AND coalesce(mark, '') != 'skip' GROUP BY grp, grp_shoot").all()) {
+    const key = `${orgOf(w.profile)}|${w.project || ''}`.toLowerCase();
+    waiting.set(key, (waiting.get(key) || 0) + w.n);
   }
 
   // Totals per project: the planned ones, plus any project seen in the log or in a group.

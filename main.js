@@ -318,8 +318,9 @@ function registerIpc() {
   });
   ipcMain.handle('groups:set', (_e, { cardId, fileIds, profile, shoot }) => {
     // A project name typed here for the first time is kept, so it is offered next time.
-    if (profile && shoot && !readProjects().some((p) => p.org === profile && p.name.toLowerCase() === String(shoot).toLowerCase())) {
-      saveProjects([...readProjects(), { org: profile, name: shoot, date: '' }]);
+    const org = profile ? (readProfiles().find((p) => p.name === profile) || {}).albumParent || profile : '';
+    if (org && shoot && !readProjects().some((p) => p.org === org && p.name.toLowerCase() === String(shoot).toLowerCase())) {
+      saveProjects([...readProjects(), { org, name: shoot, date: '' }]);
     }
     return setGroup(db, cardId, fileIds || [], profile, shoot);
   });
@@ -796,9 +797,40 @@ function registerIpc() {
     setSettings(db, { projects: JSON.stringify(clean) });
     return clean;
   };
+  // Orgs: who the work is for (also the Lightroom album folder). The saved list, plus any
+  // org a profile or project already names.
+  const readOrgs = () => {
+    let saved = [];
+    try {
+      saved = JSON.parse(getSettings(db).orgs || '[]');
+    } catch {
+      saved = [];
+    }
+    const all = [...saved, ...readProfiles().map((p) => p.albumParent), ...readProjects().map((p) => p.org)];
+    const seen = new Set();
+    return all.map((o) => String(o || '').trim()).filter((o) => o && !seen.has(o.toLowerCase()) && seen.add(o.toLowerCase())).sort((a, b) => a.localeCompare(b));
+  };
+  ipcMain.handle('orgs:get', () => readOrgs());
+  ipcMain.handle('orgs:add', (_e, name) => {
+    const n = String(name || '').trim();
+    if (n && !readOrgs().some((o) => o.toLowerCase() === n.toLowerCase())) {
+      let saved = [];
+      try {
+        saved = JSON.parse(getSettings(db).orgs || '[]');
+      } catch {
+        saved = [];
+      }
+      setSettings(db, { orgs: JSON.stringify([...saved, n]) });
+    }
+    return readOrgs();
+  });
   ipcMain.handle('projects:get', () => readProjects());
   ipcMain.handle('projects:save', (_e, list) => saveProjects(list));
-  ipcMain.handle('projects:log', () => projectLog(db, readProjects()));
+  // The log knows the profile each import used; its org is that profile's org.
+  ipcMain.handle('projects:log', () => {
+    const orgOf = new Map(readProfiles().map((p) => [p.name, p.albumParent || p.name]));
+    return projectLog(db, readProjects(), (profile) => (profile ? orgOf.get(profile) || profile : ''));
+  });
   // Second copies of the files that are only on one drive. Only ever writes new files
   // under the chosen folder; the source drive is read, never changed.
   const planOpts = (o) => ({ vol: o.vol, folder: o.folder, dest: o.dest, countLightroom: safeRules().countLightroom, diskOf: diskOfVol });

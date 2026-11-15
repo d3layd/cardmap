@@ -5,8 +5,8 @@
 async function loadProjects() {
   state.projectsPage = { ...(state.projectsPage || {}), loading: true };
   if (state.view === 'projects') renderMain();
-  const [data, profiles] = await Promise.all([api.invoke('projects:log'), loadProfiles()]);
-  state.projectsPage = { ...state.projectsPage, data, profiles, loading: false };
+  const [data, orgs] = await Promise.all([api.invoke('projects:log'), api.invoke('orgs:get'), loadProfiles()]);
+  state.projectsPage = { ...state.projectsPage, data, orgs, loading: false };
   if (state.view === 'projects') renderMain();
 }
 
@@ -49,29 +49,42 @@ function projectsView() {
     if (!P || !P.loading) loadProjects();
     return [...intro, h('p', { class: 'lede' }, 'Loading')];
   }
-  const { data, profiles } = P;
-  const form = P.form || (P.form = { org: (profiles[0] || {}).name || '', name: '', date: '', note: '' });
+  const { data, orgs } = P;
+  const form = P.form || (P.form = { org: orgs[0] || '', name: '', date: '', note: '' });
+  if (form.org && !orgs.includes(form.org) && form.org !== '+') form.org = orgs[0] || '';
   const planned = data.projects.filter((p) => p.planned);
   const save = async (list) => {
     await api.invoke('projects:save', list.map(({ org, name, date, note }) => ({ org, name, date, note })));
     await loadProjects();
   };
 
-  const add = !profiles.length
-    ? h('div', { class: 'card-box' }, 'Projects belong to an org, which is an import profile. ',
-        h('button', { class: 'link', onclick: () => show('settings') }, 'Make a profile in Settings'), ' first.')
-    : h('div', { class: 'card-box' },
+  const newOrg = async () => {
+    const name = (P.newOrg || '').trim();
+    if (!name) return;
+    P.orgs = await api.invoke('orgs:add', name);
+    P.data.orgs = P.orgs;
+    state.projectsPage.orgs = P.orgs;
+    form.org = name;
+    P.newOrg = '';
+    renderMain();
+  };
+  const add = h('div', { class: 'card-box' },
         h('div', { class: 'row tight' },
-          h('select', { 'aria-label': 'Org', onchange: (e) => { form.org = e.target.value; } },
-            profiles.map((p) => h('option', { value: p.name, selected: p.name === form.org }, p.name))),
+          h('select', { 'aria-label': 'Org', onchange: (e) => { form.org = e.target.value; renderMain(); } },
+            orgs.map((o) => h('option', { value: o, selected: o === form.org }, o)),
+            h('option', { value: '+', selected: form.org === '+' || !orgs.length }, 'New org...')),
+          form.org === '+' || !orgs.length ? [
+            h('input', { type: 'text', class: 'inline', placeholder: 'Org name', value: P.newOrg || '', 'aria-label': 'New org name', oninput: (e) => { P.newOrg = e.target.value; } }),
+            h('button', { class: 'btn', onclick: newOrg }, 'Add org')] : null),
+        h('div', { class: 'row tight' },
           h('input', { type: 'text', class: 'inline', placeholder: 'Project name', value: form.name, 'aria-label': 'Project name', oninput: (e) => { form.name = e.target.value; } }),
           h('input', { type: 'text', class: 'inline', placeholder: 'Date (YYYY-MM-DD, optional)', value: form.date, 'aria-label': 'Project date', oninput: (e) => { form.date = e.target.value; } }),
-          h('button', { class: 'btn primary', onclick: async () => {
-            if (!form.org || !form.name.trim()) return;
+          h('button', { class: 'btn primary', disabled: !form.org || form.org === '+', onclick: async () => {
+            if (!form.org || form.org === '+' || !form.name.trim()) return;
             await save([...planned, { org: form.org, name: form.name.trim(), date: form.date.trim(), note: '' }]);
             P.form = { ...form, name: '', date: '' };
           } }, 'Add project')),
-        h('div', { class: 'hint' }, 'The project name becomes the shoot name: it fills the folder-name pattern and the Lightroom album name ("YYYY-MM-DD Project").'));
+        h('div', { class: 'hint' }, 'An org is who the work is for, and its Lightroom album folder. Its projects are offered for every import profile set to that org, photo or video. The project name fills the folder-name pattern and the album name ("YYYY-MM-DD Project").'));
 
   const projectGrid = grid('projects', [
     { label: 'Org', value: (p) => p.org, cell: (p) => p.org || h('span', { class: 'none' }, 'none') },
